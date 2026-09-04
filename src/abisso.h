@@ -1,9 +1,9 @@
 /* ABISSO - Port PSVita (SDL2) - header condiviso logica di gioco.
  * Port 1:1 della versione web (index.html): stessi semi RNG, stesse classi,
  * stessi mostri/boss, stessa generazione dungeon, stessi controlli rimappati.
- * Single-player offline completo. Multiplayer P2P WebRTC non disponibile su
- * PSVita (manca lo stack di sistema): il room-code resta seed-compatibile
- * con la versione web (stesso codice = stesso dungeon).
+ * Single-player offline. Il multiplayer P2P WebRTC non esiste su PSVita:
+ * ogni run crea un mondo fresco con seed casuale come fa la web
+ * (bootstrapFreshWorld), e il room-code resta solo etichetta della run.
  */
 #ifndef ABISSO_H
 #define ABISSO_H
@@ -16,30 +16,34 @@
 extern "C" {
 #endif
 
-#define ABISSO_VERSION "1.0.0"
+#define ABISSO_VERSION "1.0.3"
 #define ABISSO_TITLEID "ABSS00001"
 
 #define SCR_W 960
 #define SCR_H 544
 
-#define MAP_MAX_W 64
-#define MAP_MAX_H 64
+#define MAP_MAX_W 132
+#define MAP_MAX_H 76
 
 #define T_WALL 0
 #define T_FLOOR 1
 #define T_STAIRS 2
 
-#define MAX_MONSTERS 80
+#define MAX_MONSTERS 96
 #define MAX_PROJS 96
 #define MAX_PARTS 320
 #define MAX_FLOATS 32
-#define MAX_CHESTS 12
-#define MAX_TORCHES 64
+#define MAX_CHESTS 24
+#define MAX_TORCHES 96
 #define MAX_LOGLINES 8
+#define MAX_ITEMS 64
+#define MAX_GATES 12
 #define MAX_NAME 24
 #define MAX_ROOM 24
 
-#define TILE_BASE 32
+#define TILE_BASE 27
+#define FOV_RADIUS 7.4
+#define DOWNED_BLEEDOUT 22.0
 
 /* ---------- RNG identico al JS: FNV-1a + mulberry32 ---------- */
 uint32_t ab_hash_str(const char *s);
@@ -75,7 +79,7 @@ typedef struct {
   double proj_speed;
   double ability_cd;
   int ability_mana;
-  const char *sprite;  /* path asset */
+  const char *sprite;  /* chiave ENTITY_SPRITES (sheet o file) */
 } AbClassDef;
 
 const AbClassDef *ab_class_def(int id);
@@ -88,18 +92,31 @@ typedef struct {
   const char *name;
   int hp, dmg;
   double speed, aggro;
-  int gold_min, gold_max, xp;
+  int gold_min, gold_max;
   bool boss;
   bool erratic, poison, lifesteal, split, dash;
-  const char *sprite;
+  bool swoop, cone, dbl, beam, stomp;
+  double ranged_range;  /* >0: attacca a distanza */
+  char summon;          /* boss: tipo evocato, 0 nessuno */
+  int summon_n;
+  const char *sprite;   /* chiave ENTITY_SPRITES */
 } AbMonDef;
 
-const AbMonDef *ab_mon_def(const char *key);
-const AbMonDef *ab_mon_def_by_idx(int i);
-int ab_mon_def_count(void);
+const AbMonDef *ab_mon_def(char key);
 bool ab_is_boss_floor(int depth);
 char ab_boss_for_depth(int depth); /* 'D','X','L','M','R','K' */
 const char *ab_boss_name(char b);
+int ab_mon_weight(char key, int depth);
+
+/* ---------- Rarita / equip / powerup (da index.html) ---------- */
+typedef enum { R_COMUNE = 0, R_RARO, R_EPICO, R_LEGGENDARIO } AbRarity;
+const char *ab_rarity_name(int r);
+void ab_rarity_color(int r, double *pr, double *pg, double *pb);
+bool ab_sprite_crop(const char *key, int *x, int *y, int *w, int *h);
+bool ab_entity_sheet(const char *key, const char **sheet, int *cell, int *cells);
+typedef enum { BUFF_RAGE = 0, BUFF_SHIELD, BUFF_HASTE, BUFF_FOCUS, BUFF_COUNT } AbBuff;
+extern const double BUFF_DURATION[BUFF_COUNT];
+extern const char *BUFF_NAMES[BUFF_COUNT];
 
 /* ---------- Entita ---------- */
 typedef struct {
@@ -111,14 +128,20 @@ typedef struct {
   double speed, aggro;
   double facing_x, facing_y;
   double atk_cd, wander_t, wx, wy;
-  double dot_t, dot_acc;   /* veleno */
+  double dot_t;      /* veleno subito */
+  double dot_acc;
   double regen_acc;
   int affix; /* 0 nessuno,1 veloce,2 esplosivo,3 rigenerante */
   bool is_boss;
   /* boss state */
-  double boss_t, spec_cd;
-  int boss_phase;
-  double tx, ty; /* telegraph target */
+  double spec_cd, breath_cd, fb_cd, fly_cd, fly_t, dive_t, dive_x, dive_y;
+  int summon_left;
+  bool flying;
+  /* attacchi dedicati comuni: 0 nessuno,1 carica,2 dash,3 swoop,4 bolt */
+  int fx_mode, wind_kind;
+  double fx_t, fx_dur, fx_tx, fx_ty, fx_speed;
+  bool fx_hit;
+  double dent_t;
 } AbMonster;
 
 typedef struct {
@@ -127,6 +150,9 @@ typedef struct {
   double life, range_left;
   int dmg;
   bool friendly;
+  bool poison;   /* avvelena */
+  bool web;      /* rallenta */
+  double hit_r;  /* raggio impatto */
   double r, g, b;
   double size;
 } AbProj;
@@ -150,36 +176,50 @@ typedef struct {
   bool active;
   int tx, ty;
   bool open;
-  int gold;
-  int kind; /* 0 oro,1 pozione,2 mana,3 equip */
-  int rarity; /* 0 comune,1 raro,2 epico,3 leggendario */
+  bool boss_chest;
+  char id[32];
 } AbChest;
 
 typedef struct {
   int tx, ty;
 } AbTorch;
 
-/* ---------- Equip ---------- */
+/* oggetto a terra: tesori, pozioni, powerup, equip */
+typedef struct {
+  bool active;
+  double x, y;
+  int kind; /* 0 gold,1 gem,2 power,3 potion,4 manapotion,5 equip */
+  int amount;
+  int buff; /* per kind power */
+  int rarity;
+  int slot; /* per kind equip */
+  int st_hp, st_dmg, st_spd, st_arm;
+} AbItem;
+
+/* ---------- Equip (slot come la web, stat in %) ---------- */
 typedef struct {
   bool filled;
-  char name[32];
   int rarity;
-  int hp, dmg;
-  double speed;
-} AbEquip; /* 5 slot: elmo, collana, armatura, anello, gambali */
+  int hp, dmg_pct, spd_pct, arm_pct;
+  char name[48];
+} AbEquip; /* 5 slot: helm, necklace, armor, ring, greaves */
+extern const char *EQUIP_SLOT_NAMES[5];
 
 /* ---------- Giocatore ---------- */
 typedef struct {
   double x, y, rx, ry;
   double fx, fy; /* facing */
   int cls;
-  int hp, max_hp, mp, max_mp;
+  int hp, max_hp;
+  double mp, max_mp;
   double speed;
-  int gold, potions, mana_potions, xp, level;
+  int gold, potions, mana_potions;
   double atk_cd, ability_cd;
-  double buff_rage_t, buff_shield_t, buff_haste_t;
+  double buffs[BUFF_COUNT];
   double anim_t; /* attacco */
   double iframes;
+  double poison_t, poison_acc;
+  double web_t;  /* rallentato dalla tela */
   double charge_t; /* prof colpo caricato */
   bool dead, downed;
   double downed_t;
@@ -195,8 +235,13 @@ typedef struct {
   int spawn_x, spawn_y;
   int stairs_x, stairs_y;
   int merch_x, merch_y;
+  int safe_x, safe_y, safe_w, safe_h;
   int arena_cx, arena_cy, arena_w, arena_h;
   bool has_arena;
+  char arena_boss;
+  int gates[MAX_GATES][2];
+  int gate_count;
+  bool gates_closed;
 } AbMap;
 
 /* ---------- Stato gioco ---------- */
@@ -217,7 +262,8 @@ typedef struct {
   AbFloat floats[MAX_FLOATS];
   AbChest chests[MAX_CHESTS];
   AbTorch torches[MAX_TORCHES];
-  int torch_count, chest_count;
+  AbItem items[MAX_ITEMS];
+  int torch_count, chest_count, item_count;
   int depth;
   uint32_t world_seed;
   char room[MAX_ROOM];
@@ -233,10 +279,10 @@ typedef struct {
   int log_head;
   char loot[96];
   double loot_t;
-  int loot_rarity;
+  double loot_r, loot_g, loot_b;
   char boss_name[48];
   int boss_hp, boss_max;
-  bool boss_active;
+  bool boss_active, boss_dead;
   bool minimap, help, merchant_open;
   bool mute;
   double zoom;
@@ -244,8 +290,6 @@ typedef struct {
   int best_depth, best_gold;
   /* debug */
   bool god, speed5;
-  /* boss arena lock */
-  bool arena_locked;
 } AbGame;
 
 extern AbGame G;
@@ -263,13 +307,16 @@ void ab_player_attack(void);
 void ab_descend(void);
 void ab_add_log(const char *s);
 void ab_toast(const char *s);
-void ab_loot_banner(const char *s, int rarity);
+void ab_loot_banner(const char *s, double r, double g, double b);
 void ab_float_text(double x, double y, const char *s, double r, double g, double b);
 void ab_burst(double x, double y, int n, double r, double g, double b, double spd);
 bool ab_is_walkable(int tx, int ty);
 void ab_save_record(void);
 void ab_load_record(void);
 bool ab_merchant_buy(int idx);
+int ab_merchant_price(int idx);
+void ab_equip_bonus(int *hp, int *dmg_pct, int *spd_pct, int *arm_pct);
+void ab_update_fov(void);
 
 /* tasti logici (bitmask) condivisa con input/render */
 enum {

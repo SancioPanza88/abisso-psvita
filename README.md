@@ -10,8 +10,9 @@ Port **1:1** del roguelike multiplayer web su **PS Vita** (homebrew `.vpk`).
 La versione web usa **Trystero + Nostr + WebRTC** (CDN + relay `wss://`). Su PSVita **non esiste uno stack WebRTC** di sistema e la CPU/RAM non reggono `libwebrtc`: il multiplayer P2P **non è disponibile** sulla Vita.
 
 Per restare 1:1 dove conta:
-- **Stesso seed dal room-code**: stesso codice stanza = stesso dungeon della versione web (hash identico).
-- Badge `OFFLINE` in HUD + log esplicativo.
+- **Stesse tabelle e formule**: classi, mostri, boss, equip, rarità, mercante, pozioni, FOV, dungeon — copiati dalla web.
+- **Mondo fresco casuale** a ogni run, come il `bootstrapFreshWorld` della web.
+- Badge `OFFLINE` in HUD.
 - Tutte le meccaniche single-player sono complete (classi, abilità, boss, mercante, loot, record).
 
 ## Controlli (Vita)

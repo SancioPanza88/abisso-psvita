@@ -17,8 +17,8 @@ static SDL_Window *win = NULL;
 static SDL_Renderer *ren = NULL;
 
 /* ---------- sprite ---------- */
-#define MAXSPR 72
-typedef struct { char name[48]; SDL_Texture *tex; int w, h; SDL_Rect crop; bool has_crop; } Spr;
+#define MAXSPR 80
+typedef struct { char name[48]; SDL_Texture *tex; int w, h; } Spr;
 static Spr sprs[MAXSPR];
 static int nspr = 0;
 static int spr_ok = 0;
@@ -38,55 +38,60 @@ static SDL_Texture *spr_get(const char *name) {
   return NULL;
 }
 
-static SDL_Rect *spr_crop(const char *name) {
+static bool spr_dims(const char *name, int *w, int *h) {
   for (int i = 0; i < nspr; i++)
-    if (strcmp(sprs[i].name, name) == 0) return sprs[i].has_crop ? &sprs[i].crop : NULL;
-  return NULL;
-}
-
-/* Come prepareTileTextures() della web: i PNG dei terreni hanno grandi
- * margini trasparenti (1408x768) — si ritaglia il bbox opaco e la tile
- * disegna solo quello, altrimenti resta un francobollo su sfondo nero. */
-static bool needs_crop(const char *name) {
-  static const char *list[] = {
-    "floor_stone","floor_dirt","wall_stone","wall_brick","stairs","torch",NULL
-  };
-  for (int i = 0; list[i]; i++)
-    if (strcmp(name, list[i]) == 0) return true;
+    if (strcmp(sprs[i].name, name) == 0) { *w = sprs[i].w; *h = sprs[i].h; return true; }
   return false;
 }
 
-static SDL_Rect surf_bbox(SDL_Surface *s) {
-  SDL_Rect r = {0, 0, s->w, s->h};
-  SDL_Surface *c = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_RGBA32, 0);
-  if (!c) return r;
-  if (SDL_MUSTLOCK(c)) SDL_LockSurface(c);
-  {
-    Uint32 *px = (Uint32 *)c->pixels;
-    int stride = c->pitch / 4;
-    int x0 = c->w, y0 = c->h, x1 = -1, y1 = -1;
-    for (int y = 0; y < c->h; y++) {
-      for (int x = 0; x < c->w; x++) {
-        Uint8 a = (Uint8)((px[y * stride + x] >> 24) & 0xFF);
-        if (a > 8) {
-          if (x < x0) x0 = x;
-          if (x > x1) x1 = x;
-          if (y < y0) y0 = y;
-          if (y > y1) y1 = y;
-        }
-      }
+/* texture + src rect per chiave entita (sheet/crop/file). has=false: tutto il file. */
+static SDL_Texture *ent_tex_src(const char *key, SDL_Rect *src, bool *has) {
+  *has = false;
+  const char *sheet; int cell, cells;
+  if (ab_entity_sheet(key, &sheet, &cell, &cells)) {
+    SDL_Texture *t = spr_get(sheet);
+    if (!t) return NULL;
+    int sw = 0, sh = 0;
+    spr_dims(sheet, &sw, &sh);
+    if (sw > 0 && cells > 0) {
+      int cw = sw / cells;
+      src->x = cell * cw; src->y = 0; src->w = cw; src->h = sh;
+      *has = true;
+      return t;
     }
-    if (x1 >= x0 && y1 >= y0) {
-      if (x0 > 1) x0 -= 2;
-      if (y0 > 1) y0 -= 2;
-      if (x1 < s->w - 3) x1 += 2;
-      if (y1 < s->h - 3) y1 += 2;
-      r.x = x0; r.y = y0; r.w = x1 - x0 + 1; r.h = y1 - y0 + 1;
-    }
+    return NULL;
   }
-  if (SDL_MUSTLOCK(c)) SDL_UnlockSurface(c);
-  SDL_FreeSurface(c);
-  return r;
+  SDL_Texture *t = spr_get(key);
+  if (!t) return NULL;
+  int cx, cy, cw, ch;
+  if (ab_sprite_crop(key, &cx, &cy, &cw, &ch)) {
+    src->x = cx; src->y = cy; src->w = cw; src->h = ch;
+    *has = true;
+  }
+  return t;
+}
+
+/* vecchia interfaccia: solo texture (src ignorato) */
+static SDL_Texture *ent_tex(const char *key, SDL_Rect *src) {
+  bool has = false;
+  return ent_tex_src(key, src, &has);
+}
+
+/* Crop 1:1 SPRITE_CROP della web (da data.c); per le entità su sheet,
+ * il rect della cella orizzontale. */
+static bool spr_src_rect(const char *name, int sw, int sh, SDL_Rect *out) {
+  int x, y, w, h;
+  if (ab_sprite_crop(name, &x, &y, &w, &h)) {
+    out->x = x; out->y = y; out->w = w; out->h = h;
+    return true;
+  }
+  const char *sheet; int cell, cells;
+  if (ab_entity_sheet(name, &sheet, &cell, &cells) && sw > 0 && cells > 0) {
+    int cw = sw / cells;
+    out->x = cell * cw; out->y = 0; out->w = cw; out->h = sh;
+    return true;
+  }
+  return false;
 }
 
 static void spr_load(const char *name, const char *rel) {
@@ -102,12 +107,7 @@ static void spr_load(const char *name, const char *rel) {
   }
   strncpy(sprs[nspr].name, name, 47);
   sprs[nspr].name[47] = '\0';
-  sprs[nspr].has_crop = false;
   if (s) {
-    if (needs_crop(name)) {
-      sprs[nspr].crop = surf_bbox(s);
-      sprs[nspr].has_crop = true;
-    }
     sprs[nspr].tex = SDL_CreateTextureFromSurface(ren, s);
     sprs[nspr].w = s->w; sprs[nspr].h = s->h;
     SDL_FreeSurface(s);
@@ -121,14 +121,14 @@ static void spr_load(const char *name, const char *rel) {
 
 static void sprites_init(void) {
   const char *files[] = {
-    "hero_guerriero","hero_ladro","hero_mago","hero_ranger","hero_paladino",
-    "hero_negromante","hero_bardo","hero_monaco","prof",
-    "mon_cultista","mon_arpia","mon_mantide","mon_golem","mon_cavaliere","mon_cavaliere_alt",
-    "mon_sciamano","mon_drago","mon_gelatina","mon_goblin","mon_melma","mon_orco",
-    "mon_pipistrello","mon_ragno","mon_ratto","mon_scheletro","mon_serpente","mon_spettro",
-    "mon_zombie","boss_golem","boss_lich","boss_melme","boss_ragno","boss_ratti",
+    "heroes_sheet","monsters_sheet1","monsters_sheet2","chest_sheet",
+    "hero_paladino","hero_negromante","hero_bardo","hero_monaco","prof",
+    "mon_spettro","mon_drago","mon_orco",
+    "mon_serpente","mon_arpia","mon_cavaliere","mon_cavaliere_alt",
+    "mon_cultista","mon_mantide","mon_golem","mon_sciamano",
+    "boss_golem","boss_lich","boss_melme","boss_ragno","boss_ratti",
     "floor_stone","floor_dirt","wall_stone","wall_brick","stairs","torch",
-    "chest_closed","chest_open","merchant","rianima","icon_gold","icon_potion_hp",
+    "merchant","rianima","icon_gold","icon_potion_hp",
     "icon_potion_mana","icon_lightning","icon_eye","icon_shield_buff","icon_gem_blue",
     "equip_helm","equip_armor","equip_ring","equip_necklace","equip_greaves",
     "potenziamento_fretta","powerupfocus","furia",NULL
@@ -136,6 +136,10 @@ static void sprites_init(void) {
   for (int i = 0; files[i]; i++) {
     char rel[96];
     if (strcmp(files[i], "prof") == 0) snprintf(rel, sizeof rel, "assets/speciali/prof.png");
+    else if (strcmp(files[i], "heroes_sheet") == 0) snprintf(rel, sizeof rel, "assets/sprites/heroes_sheet.png");
+    else if (strcmp(files[i], "monsters_sheet1") == 0) snprintf(rel, sizeof rel, "assets/sprites/monsters_sheet1.png");
+    else if (strcmp(files[i], "monsters_sheet2") == 0) snprintf(rel, sizeof rel, "assets/sprites/monsters_sheet2.png");
+    else if (strcmp(files[i], "chest_sheet") == 0) snprintf(rel, sizeof rel, "assets/sprites/chest_sheet.png");
     else snprintf(rel, sizeof rel, "assets/sprites/%s.png", files[i]);
     spr_load(files[i], rel);
   }
@@ -268,15 +272,49 @@ static void w2s(double wx, double wy, double *sx, double *sy) {
   }
 }
 
-static void draw_spr(const char *name, double sx, double sy, double scale, double alpha) {
-  SDL_Texture *t = spr_get(name);
-  SDL_Rect *src = spr_crop(name);
+/* disegna un'entita per chiave ENTITY_SPRITES (sheet o file singolo) */
+static void draw_ent(const char *key, double sx, double sy, double scale, double alpha,
+                     double angle, bool flip) {
+  SDL_Rect src = {0, 0, 0, 0}, *srcp = NULL;
+  SDL_Texture *t = ent_tex(key, &src);
   int dw = (int)(tile_px() * scale);
   int dh = (int)(tile_px() * scale);
   SDL_Rect d = {(int)(sx - dw / 2), (int)(sy - dh / 2), dw, dh};
   if (t) {
+    /* se la chiave usa crop/sheet, src e valido */
+    const char *sheet;
+    int cell, cells, sw = 0, sh = 0;
+    if (ab_entity_sheet(key, &sheet, &cell, &cells)) srcp = &src;
+    else {
+      int cx, cy, cw, ch;
+      if (ab_sprite_crop(key, &cx, &cy, &cw, &ch)) {
+        src.x = cx; src.y = cy; src.w = cw; src.h = ch;
+        srcp = &src;
+      }
+    }
+    (void)sw; (void)sh;
     SDL_SetTextureAlphaMod(t, (Uint8)(alpha * 255));
-    SDL_RenderCopy(ren, t, src, &d);
+    SDL_RenderCopyEx(ren, t, srcp, &d, angle, NULL,
+      flip ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
+    SDL_SetTextureAlphaMod(t, 255);
+  } else {
+    draw_box(d.x, d.y, d.w, d.h, 200, 170, 90, (Uint8)(alpha * 255), true);
+    draw_text(d.x + d.w / 2 - 6, d.y + d.h / 2 - 8, "?", 2, 255, 255, 255);
+  }
+}
+
+static void draw_spr(const char *name, double sx, double sy, double scale, double alpha) {
+  SDL_Texture *t = spr_get(name);
+  int dw = (int)(tile_px() * scale);
+  int dh = (int)(tile_px() * scale);
+  SDL_Rect d = {(int)(sx - dw / 2), (int)(sy - dh / 2), dw, dh};
+  if (t) {
+    SDL_Rect src, *srcp = NULL;
+    int sw = 0, sh = 0;
+    spr_dims(name, &sw, &sh);
+    if (spr_src_rect(name, sw, sh, &src)) srcp = &src;
+    SDL_SetTextureAlphaMod(t, (Uint8)(alpha * 255));
+    SDL_RenderCopy(ren, t, srcp, &d);
     SDL_SetTextureAlphaMod(t, 255);
   } else {
     draw_box(d.x, d.y, d.w, d.h, 120, 90, 60, (Uint8)(alpha * 255), true);
@@ -308,33 +346,45 @@ static void draw_world(void) {
     shy = cos(G.time * 55) * G.shake * 14;
   }
 
+  double flick = 0.9 + 0.1 * sin(G.torch_clk * 3.1) + 0.04 * sin(G.torch_clk * 7.7);
+
   for (int y = y0; y < y1; y++) {
     for (int x = x0; x < x1; x++) {
-      if (!G.map.visited[y][x]) continue;
+      bool vis = G.map.visible[y][x] ? true : false;
+      if (!vis && !G.map.visited[y][x]) continue;
       uint8_t tl = G.map.tiles[y][x];
       double sx, sy;
       w2s(x + 0.5, y + 0.5, &sx, &sy);
       sx += shx; sy += shy;
       if (sx < -t * 2 || sy < -t * 2 || sx > SCR_W + t * 2 || sy > SCR_H + t * 2) continue;
-      const char *sn = "floor_stone";
-      if (tl == T_WALL) sn = ((x + y) % 2) ? "wall_stone" : "wall_brick";
-      else if (tl == T_STAIRS) sn = "stairs";
-      else sn = ((x + y) % 2) ? "floor_stone" : "floor_dirt";
-      draw_spr(sn, sx, sy, G.view == 1 ? 1.0 : 1.05, 1.0);
-      /* luce torce */
-      double light = 0;
-      {
-        double dp = ab_dist(G.p.x, G.p.y, x + 0.5, y + 0.5);
-        if (dp < 7) light = 1;
+      double alpha = vis ? flick : 0.32;
+      if (tl == T_WALL) {
+        const char *sn = ((x + y) % 2) ? "wall_stone" : "wall_brick";
+        draw_spr(sn, sx, sy, G.view == 1 ? 1.0 : 1.05, alpha);
+        /* bordo superiore illuminato se sopra c'e pavimento (profondita) */
+        if (y > 0 && G.map.tiles[y-1][x] != T_WALL) {
+          draw_box((int)(sx - t / 2), (int)(sy - t / 2), (int)t + 1, 3, 200, 170, 120, (Uint8)(90 * alpha), true);
+        }
+      } else if (tl == T_STAIRS) {
+        draw_spr("floor_stone", sx, sy, 1.05, alpha);
+        double stPulse = 0.55 + 0.45 * sin(G.torch_clk * 2.4);
+        draw_box((int)(sx - t * 0.3), (int)(sy - t * 0.3), (int)(t * 0.6), (int)(t * 0.6),
+          232, 161, 61, (Uint8)(90 * stPulse * alpha), true);
+        draw_spr("stairs", sx, sy, 0.8, alpha);
+      } else {
+        const char *sn = ((x + y) % 2) ? "floor_stone" : "floor_dirt";
+        draw_spr(sn, sx, sy, G.view == 1 ? 1.0 : 1.05, alpha);
+      }
+      /* alone caldo attorno alle torce */
+      if (vis) {
         for (int i = 0; i < G.torch_count; i++) {
           double dt2 = ab_dist(G.torches[i].tx + 0.5, G.torches[i].ty + 0.5, x + 0.5, y + 0.5);
-          double fl = 4.5 + sin(G.torch_clk * 9 + i * 1.7) * 0.6;
-          if (dt2 < fl) { light = 1; break; }
+          if (dt2 < 2.6) {
+            draw_box((int)(sx - t / 2), (int)(sy - t / 2), (int)t + 1, (int)t + 1,
+              255, 190, 120, (Uint8)(26 * flick), true);
+            break;
+          }
         }
-      }
-      if (!light) {
-        int sxx = (int)(sx - t / 2), syy = (int)(sy - t / 2);
-        draw_box(sxx, syy, (int)t + 1, (int)t + 1, 0, 0, 0, 110, true);
       }
     }
   }
@@ -351,7 +401,7 @@ static void draw_world(void) {
   {
     double sx, sy;
     w2s(G.map.merch_x + 0.5, G.map.merch_y + 0.5, &sx, &sy);
-    draw_spr("merchant", sx + shx, sy + shy + sin(G.time * 2) * 2, 1.1, 1.0);
+    draw_ent("merchant", sx + shx, sy + shy + sin(G.time * 2) * 2, 1.1, 1.0, 0, false);
   }
   /* forzieri */
   for (int i = 0; i < G.chest_count; i++) {
@@ -359,7 +409,31 @@ static void draw_world(void) {
     if (!c->active || !G.map.visited[c->ty][c->tx]) continue;
     double sx, sy;
     w2s(c->tx + 0.5, c->ty + 0.5, &sx, &sy);
-    draw_spr(c->open ? "chest_open" : "chest_closed", sx + shx, sy + shy, 0.95, 1.0);
+    draw_ent(c->open ? "chest_open" : "chest_closed", sx + shx, sy + shy, 0.95, 1.0, 0, false);
+  }
+  /* oggetti a terra */
+  for (int i = 0; i < MAX_ITEMS; i++) {
+    AbItem *it = &G.items[i];
+    if (!it->active) continue;
+    int itx = (int)it->x, ity = (int)it->y;
+    if (itx < 0 || ity < 0 || itx >= G.map.w || ity >= G.map.h) continue;
+    if (!G.map.visible[ity][itx]) continue;
+    double sx, sy;
+    w2s(it->x, it->y, &sx, &sy);
+    double bob = sin(G.time * 3 + i) * 2;
+    const char *ik = "icon_gold";
+    if (it->kind == 1) ik = "icon_gem_blue";
+    else if (it->kind == 3) ik = "icon_potion_hp";
+    else if (it->kind == 4) ik = "icon_potion_mana";
+    else if (it->kind == 2) {
+      ik = it->buff == BUFF_RAGE ? "furia" :
+           it->buff == BUFF_SHIELD ? "icon_shield_buff" :
+           it->buff == BUFF_HASTE ? "potenziamento_fretta" : "powerupfocus";
+    } else if (it->kind == 5) {
+      ik = it->slot == 0 ? "equip_helm" : it->slot == 1 ? "equip_necklace" :
+           it->slot == 2 ? "equip_armor" : it->slot == 3 ? "equip_ring" : "equip_greaves";
+    }
+    draw_ent(ik, sx + shx, sy + shy + bob, 0.7, 1.0, 0, false);
   }
   /* entita ordinate per y */
   typedef struct { int kind; int idx; double depth; } DR;
@@ -369,7 +443,7 @@ static void draw_world(void) {
     if (G.mons[i].active) {
       int tx = (int)G.mons[i].x, ty = (int)G.mons[i].y;
       if (tx < 0 || ty < 0 || tx >= G.map.w || ty >= G.map.h) continue;
-      if (!G.map.visited[ty][tx]) continue;
+      if (!G.map.visible[ty][tx]) continue;
       order[n].kind = 0; order[n].idx = i;
       order[n].depth = G.view == 1 ? G.mons[i].rx + G.mons[i].ry : G.mons[i].ry;
       n++;
@@ -390,19 +464,15 @@ static void draw_world(void) {
     double bob = sin(G.time * 3 + order[i].idx) * 2;
     /* ombra */
     draw_box((int)(sx - t * 0.3), (int)(sy + t * 0.32), (int)(t * 0.6), (int)(t * 0.14), 0, 0, 0, 120, true);
-    char ks[2] = {m->type, 0};
-    const AbMonDef *td = ab_mon_def(ks);
-    const char *sn = td ? td->sprite : "mon_zombie";
-    /* strip assets/sprites/ + .png -> nome */
-    const char *base = strrchr(sn, '/');
-    base = base ? base + 1 : sn;
-    static char nb[48];
-    strncpy(nb, base, 47);
-    char *dot = strrchr(nb, '.');
-    if (dot) *dot = 0;
+    const AbMonDef *td = ab_mon_def(m->type);
+    const char *ekey = td ? td->sprite : "zombie";
     double sc = m->is_boss ? 1.7 : 1.0;
     if (m->affix == 1) bob += sin(G.time * 10) * 1.5;
-    draw_spr(nb, sx, sy + bob - (m->is_boss ? 6 : 0), sc, 1.0);
+    {
+      double breathe = 1 + 0.03 * sin(G.time * 2.2 + order[i].idx);
+      (void)breathe;
+      draw_ent(ekey, sx, sy + bob - (m->is_boss ? 6 : 0), sc, 1.0, 0, m->facing_x < -0.05);
+    }
     if (m->affix > 0) {
       const char *a = m->affix == 1 ? ">" : m->affix == 2 ? "*" : "+";
       draw_text((int)sx - 4, (int)sy - (int)t - 8, a, 2, 255, m->affix == 2 ? 100 : 220, 80);
@@ -426,28 +496,25 @@ static void draw_world(void) {
       if (G.p.downed) bob = 0;
       draw_box((int)(sx - t * 0.3), (int)(sy + t * 0.32), (int)(t * 0.6), (int)(t * 0.14), 0, 0, 0, 130, true);
       const AbClassDef *c = ab_class_def(G.p.cls);
-      const char *sn = c->sprite;
-      const char *base = strrchr(sn, '/');
-      base = base ? base + 1 : sn;
-      static char nb[48];
-      strncpy(nb, base, 47);
-      char *dot = strrchr(nb, '.');
-      if (dot) *dot = 0;
       double sc = 1.15;
       if (G.p.cls == CLS_PROF) sc = 1.25;
       Uint8 alpha = 255;
       if (G.p.iframes > 0 && ((int)(G.time * 12) % 2 == 0)) alpha = 120;
-      SDL_Texture *tt = spr_get(nb);
-      int dw = (int)(t * sc), dh = (int)(t * sc);
-      SDL_Rect d = {(int)(sx - dw / 2), (int)(sy - dh / 2 + bob) - 4, dw, dh};
-      if (tt) {
-        SDL_SetTextureAlphaMod(tt, alpha);
-        /* flip verso facing */
-        SDL_RenderCopyEx(ren, tt, NULL, &d, G.p.anim_t > 0 ? 12 * G.p.fx : 0, NULL,
-          G.p.fx < -0.05 ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
-        SDL_SetTextureAlphaMod(tt, 255);
-      } else {
-        draw_box(d.x, d.y, d.w, d.h, 200, 170, 90, alpha, true);
+      {
+        SDL_Rect src, *srcp = NULL;
+        bool has = false;
+        SDL_Texture *tt = ent_tex_src(c->sprite, &src, &has);
+        if (has) srcp = &src;
+        int dw = (int)(t * sc), dh = (int)(t * sc);
+        SDL_Rect d = {(int)(sx - dw / 2), (int)(sy - dh / 2 + bob) - 4, dw, dh};
+        if (tt) {
+          SDL_SetTextureAlphaMod(tt, alpha);
+          SDL_RenderCopyEx(ren, tt, srcp, &d, G.p.anim_t > 0 ? 12 * G.p.fx : 0, NULL,
+            G.p.fx < -0.05 ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
+          SDL_SetTextureAlphaMod(tt, 255);
+        } else {
+          draw_box(d.x, d.y, d.w, d.h, 200, 170, 90, alpha, true);
+        }
       }
       /* fendente attacco */
       if (G.p.anim_t > 0) {
@@ -491,47 +558,142 @@ static void draw_world(void) {
   }
 }
 
+static void draw_disc(int cx, int cy, int r, Uint8 R, Uint8 Gc, Uint8 Bc, Uint8 a) {
+  SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(ren, R, Gc, Bc, a);
+  for (int y = -r; y <= r; y++) {
+    int hw = (int)sqrt((double)(r * r - y * y));
+    SDL_Rect rc = {cx - hw, cy + y, hw * 2 + 1, 1};
+    SDL_RenderFillRect(ren, &rc);
+  }
+  SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+}
+static void draw_ring(int cx, int cy, int r, Uint8 R, Uint8 Gc, Uint8 Bc) {
+  SDL_SetRenderDrawColor(ren, R, Gc, Bc, 255);
+  for (int a = 0; a < 360; a += 4) {
+    double t = a * 3.14159265 / 180.0;
+    SDL_Rect rc = {(int)(cx + cos(t) * r), (int)(cy + sin(t) * r), 2, 2};
+    SDL_RenderFillRect(ren, &rc);
+  }
+}
+/* orbe stile Diablo: riempimento dal basso in base alla frazione */
+static void draw_orb(int cx, int cy, int r, double frac, Uint8 fr, Uint8 fg, Uint8 fb) {
+  if (frac < 0) frac = 0;
+  if (frac > 1) frac = 1;
+  draw_disc(cx, cy, r, 20, 13, 8, 255);
+  if (frac > 0) {
+    int fh = (int)(2 * r * frac);
+    int y0 = cy + r - fh;
+    for (int y = y0; y <= cy + r; y++) {
+      int dy = y - cy;
+      int hw = (int)sqrt((double)(r * r - dy * dy));
+      double k = fh > 0 ? (double)(y - y0) / fh : 1;
+      Uint8 cr = (Uint8)(fr * (0.55 + 0.45 * k) + 30 * k);
+      Uint8 cg = (Uint8)(fg * (0.55 + 0.45 * k));
+      Uint8 cb = (Uint8)(fb * (0.55 + 0.45 * k));
+      SDL_SetRenderDrawColor(ren, cr, cg, cb, 255);
+      SDL_Rect rc = {cx - hw, y, hw * 2 + 1, 1};
+      SDL_RenderFillRect(ren, &rc);
+    }
+  }
+  draw_disc(cx - r / 3, cy - r / 3, r / 5, 255, 255, 255, 40);
+  draw_ring(cx, cy, r, 150, 110, 70);
+  draw_ring(cx, cy, r + 2, 70, 50, 30);
+}
+
 static void draw_hud(void) {
   Uint8 tr = G.c64 ? 123 : 232, tg = G.c64 ? 113 : 220, tb = G.c64 ? 213 : 197;
-  /* pannello eroe */
-  draw_box(10, 10, 250, 86, 12, 10, 7, 220, true);
-  draw_box(10, 10, 250, 86, 232, 161, 61, 255, false);
   const AbClassDef *c = ab_class_def(G.p.cls);
+  char b[96];
+  /* --- pannello eroe in alto a sinistra --- */
+  draw_box(10, 10, 250, 96, 12, 10, 7, 220, true);
+  draw_box(10, 10, 250, 96, 232, 161, 61, 255, false);
   draw_text(20, 16, c->name, 2, tr, tg, tb);
-  char b[64];
-  snprintf(b, sizeof b, "LV%d PIANO %d", G.p.level, G.depth);
+  int nm = 0;
+  for (int i = 0; i < MAX_MONSTERS; i++) if (G.mons[i].active) nm++;
+  snprintf(b, sizeof b, "PIANO %d - %d NEMICI", G.depth, nm);
   draw_text(20, 36, b, 2, 212, 175, 55);
-  /* hp/mp bar */
-  draw_box(20, 56, 150, 10, 0, 0, 0, 255, true);
-  double hf = G.p.max_hp ? (double)G.p.hp / G.p.max_hp : 0;
-  draw_box(20, 56, (int)(150 * hf), 10, 193, 68, 58, 255, true);
-  snprintf(b, sizeof b, "HP %d/%d", G.p.hp, G.p.max_hp);
-  draw_text(176, 54, b, 2, 255, 255, 255);
-  if (G.p.max_mp > 0) {
-    draw_box(20, 70, 150, 8, 0, 0, 0, 255, true);
-    double mf = (double)G.p.mp / G.p.max_mp;
-    draw_box(20, 70, (int)(150 * mf), 8, 95, 160, 201, 255, true);
-    snprintf(b, sizeof b, "MP %d/%d", G.p.mp, G.p.max_mp);
-    draw_text(176, 68, b, 2, 160, 200, 255);
-  }
-  /* oro/pozioni */
   snprintf(b, sizeof b, "ORO %d  HP+%d MANA+%d", G.p.gold, G.p.potions, G.p.mana_potions);
-  draw_text(20, 100, b, 2, 212, 175, 55);
-  /* offline badge */
-  draw_text(SCR_W - 130, 14, "OFFLINE", 2, 150, 150, 150);
-  snprintf(b, sizeof b, "STANZA %s", G.room);
-  draw_text(SCR_W - 250, 34, b, 2, 170, 255, 238);
-  if (G.best_depth > 0) {
-    snprintf(b, sizeof b, "RECORD P%d", G.best_depth);
-    draw_text(SCR_W - 250, 54, b, 2, 232, 161, 61);
+  draw_text(20, 56, b, 2, 212, 175, 55);
+  /* buff chips */
+  {
+    int bx = 20, byy = 76;
+    for (int i = 0; i < BUFF_COUNT; i++) {
+      if (G.p.buffs[i] <= 0) continue;
+      Uint8 br = 255, bg2 = 200, bb = 120;
+      if (i == BUFF_SHIELD) { br = 95; bg2 = 160; bb = 201; }
+      else if (i == BUFF_HASTE) { br = 212; bg2 = 175; bb = 55; }
+      else if (i == BUFF_FOCUS) { br = 143; bg2 = 209; bb = 255; }
+      else if (i == BUFF_RAGE) { br = 255; bg2 = 150; bb = 80; }
+      char cb[48];
+      snprintf(cb, sizeof cb, "%s %.0f", BUFF_NAMES[i], G.p.buffs[i]);
+      int w = text_w(cb, 1) + 10;
+      draw_box(bx, byy, w, 16, 30, 22, 14, 230, true);
+      draw_text(bx + 5, byy + 3, cb, 1, br, bg2, bb);
+      bx += w + 6;
+    }
+    if (G.p.ability_cd > 0) {
+      snprintf(b, sizeof b, "ABIL %.0f", G.p.ability_cd);
+      draw_text(bx, byy + 3, b, 1, 127, 174, 99);
+    }
   }
-  /* buff */
-  int by = 122;
-  if (G.p.buff_rage_t > 0) { draw_text(20, by, "FURIA", 2, 255, 150, 60); by += 18; }
-  if (G.p.buff_shield_t > 0) { draw_text(20, by, "SCUDO", 2, 255, 220, 140); by += 18; }
-  if (G.p.ability_cd > 0) {
-    snprintf(b, sizeof b, "ABIL %.0f", G.p.ability_cd);
-    draw_text(20, by, b, 2, 127, 174, 99);
+  /* --- cluster Diablo in basso a sinistra: ritratto + orbe HP/MP + equip --- */
+  {
+    int cy = SCR_H - 178 - 35;
+    int pcx = 16 + 30;
+    /* ritratto */
+    draw_disc(pcx, cy, 30, 40, 26, 16, 255);
+    {
+      SDL_Rect src, *srcp = NULL;
+      bool has = false;
+      SDL_Texture *tt = ent_tex_src(c->sprite, &src, &has);
+      if (has) srcp = &src;
+      if (tt) {
+        SDL_Rect d = {pcx - 22, cy - 22, 44, 44};
+        SDL_RenderCopy(ren, tt, srcp, &d);
+      }
+    }
+    draw_ring(pcx, cy, 30, 181, 101, 29);
+    /* orbi */
+    int hpx = pcx + 60 - 10 + 35;
+    double hf = G.p.max_hp ? (double)G.p.hp / G.p.max_hp : 0;
+    draw_orb(hpx, cy, 35, hf, 255, 110, 90);
+    char hb[32];
+    snprintf(hb, sizeof hb, "%d", G.p.hp);
+    draw_text(hpx - text_w(hb, 2) / 2, cy - 8, hb, 2, 255, 255, 255);
+    if (G.p.max_mp > 0) {
+      int mpx = hpx + 70 - 10;
+      double mf = (double)G.p.mp / G.p.max_mp;
+      draw_orb(mpx, cy, 35, mf, 120, 190, 255);
+      char mb[32];
+      snprintf(mb, sizeof mb, "%d", (int)G.p.mp);
+      draw_text(mpx - text_w(mb, 2) / 2, cy - 8, mb, 2, 255, 255, 255);
+    }
+    /* slot equip sotto il ritratto */
+    for (int i = 0; i < 5; i++) {
+      int ex = 20 + i * 24, ey = cy + 35 + 8;
+      AbEquip *e = &G.p.equip[i];
+      if (e->filled) {
+        double cr, cg, cb2;
+        ab_rarity_color(e->rarity, &cr, &cg, &cb2);
+        draw_disc(ex, ey, 9, (Uint8)(cr * 255), (Uint8)(cg * 255), (Uint8)(cb2 * 255), 255);
+        draw_ring(ex, ey, 9, 212, 175, 55);
+      } else {
+        draw_disc(ex, ey, 9, 12, 10, 8, 255);
+        draw_ring(ex, ey, 9, 90, 80, 60);
+      }
+    }
+  }
+  /* --- pannello giocatori in alto a destra --- */
+  draw_box(SCR_W - 200, 10, 190, 76, 12, 10, 7, 220, true);
+  draw_box(SCR_W - 200, 10, 190, 76, 232, 161, 61, 255, false);
+  draw_text(SCR_W - 190, 14, "GIOCATORI", 1, 150, 140, 125);
+  draw_text(SCR_W - 190, 30, "OFFLINE (SOLO)", 1, 150, 150, 150);
+  snprintf(b, sizeof b, "STANZA %s", G.room);
+  draw_text(SCR_W - 190, 46, b, 1, 170, 255, 238);
+  if (G.best_depth > 0) {
+    snprintf(b, sizeof b, "RECORD PIANO %d", G.best_depth);
+    draw_text(SCR_W - 190, 62, b, 1, 232, 161, 61);
   }
   /* boss bar */
   bool boss_alive = false;
@@ -562,7 +724,8 @@ static void draw_hud(void) {
   }
   if (G.loot_t > 0) {
     int tw = text_w(G.loot, 3);
-    draw_text(SCR_W / 2 - tw / 2, SCR_H / 2 - 80, G.loot, 3, 255, 230, 150);
+    draw_text(SCR_W / 2 - tw / 2, SCR_H / 2 - 80, G.loot, 3,
+      (Uint8)(G.loot_r * 255), (Uint8)(G.loot_g * 255), (Uint8)(G.loot_b * 255));
   }
   /* zoom/mute/view hint */
   char h[96];
@@ -586,36 +749,69 @@ static void draw_hud(void) {
 
 static void draw_minimap(void) {
   if (!G.minimap) return;
-  int mw = 200, mh = 150;
-  int x0 = SCR_W - mw - 12, y0 = 80;
-  draw_box(x0 - 4, y0 - 4, mw + 8, mh + 8, 8, 6, 4, 230, true);
+  /* 168x118 come la web */
+  int mw = 168, mh = 118;
+  int x0 = SCR_W - mw - 12, y0 = (SCR_H - mh) / 2;
+  draw_box(x0 - 4, y0 - 4, mw + 8, mh + 8, 6, 5, 3, 225, true);
   draw_box(x0 - 4, y0 - 4, mw + 8, mh + 8, 232, 161, 61, 255, false);
-  double sx = (double)mw / G.map.w, sy = (double)mh / G.map.h;
-  double s = sx < sy ? sx : sy;
+  double s = G.map.w > 0 ? mw / (double)G.map.w : 1;
+  double s2 = G.map.h > 0 ? mh / (double)G.map.h : 1;
+  if (s2 < s) s = s2;
+  double ox = x0 + (mw - G.map.w * s) / 2, oy = y0 + (mh - G.map.h * s) / 2;
+  int cell = (int)(s * 0.9) + 1;
+  if (cell < 1) cell = 1;
   for (int y = 0; y < G.map.h; y++) {
     for (int x = 0; x < G.map.w; x++) {
       if (!G.map.visited[y][x]) continue;
       int px = x0 + (int)(x * s), py = y0 + (int)(y * s);
-      Uint8 r = 60, g = 48, b = 36;
-      if (G.map.tiles[y][x] == T_WALL) { r = 30; g = 24; b = 18; }
-      else if (G.map.tiles[y][x] == T_STAIRS) { r = 255; g = 210; b = 100; }
-      SDL_Rect rc = {px, py, (int)s + 1, (int)s + 1};
+      Uint8 r = 0x3a, g = 0x2f, b = 0x22;
+      if (G.map.tiles[y][x] == T_WALL) { r = 0x24; g = 0x1c; b = 0x12; }
+      else if (x >= G.map.safe_x && y >= G.map.safe_y && x < G.map.safe_x + G.map.safe_w && y < G.map.safe_y + G.map.safe_h) {
+        r = 0x1d; g = 0x3a; b = 0x44;
+      }
+      SDL_Rect rc = {px, py, cell, cell};
       SDL_SetRenderDrawColor(ren, r, g, b, 255);
       SDL_RenderFillRect(ren, &rc);
     }
   }
-  /* player */
-  int px = x0 + (int)(G.p.x * s) - 2, py = y0 + (int)(G.p.y * s) - 2;
-  draw_box(px, py, 5, 5, 255, 255, 255, 255, true);
-  /* boss */
-  for (int i = 0; i < MAX_MONSTERS; i++) {
-    if (!G.mons[i].active || !G.mons[i].is_boss) continue;
-    int bx = x0 + (int)(G.mons[i].x * s) - 2, by = y0 + (int)(G.mons[i].y * s) - 2;
-    draw_box(bx, by, 5, 5, 255, 60, 40, 255, true);
-  }
   /* scale */
-  int stx = x0 + (int)(G.map.stairs_x * s) - 2, sty = y0 + (int)(G.map.stairs_y * s) - 2;
-  draw_box(stx, sty, 5, 5, 255, 220, 120, 255, true);
+  draw_box((int)(ox + G.map.stairs_x * s) - 1, (int)(oy + G.map.stairs_y * s) - 1, cell + 1, cell + 1, 232, 161, 61, 255, true);
+  /* forzieri chiusi */
+  for (int i = 0; i < G.chest_count; i++) {
+    AbChest *c = &G.chests[i];
+    if (!c->active || c->open) continue;
+    if (c->boss_chest && !G.boss_dead) continue;
+    draw_box((int)(ox + c->tx * s) - 1, (int)(oy + c->ty * s) - 1, cell, cell, 255, 210, 122, 255, true);
+  }
+  /* mercante */
+  draw_box((int)(ox + G.map.merch_x * s) - 1, (int)(oy + G.map.merch_y * s) - 1, cell + 1, cell + 1, 127, 174, 99, 255, true);
+  /* mostri visibili */
+  for (int i = 0; i < MAX_MONSTERS; i++) {
+    if (!G.mons[i].active) continue;
+    int tx = (int)G.mons[i].x, ty = (int)G.mons[i].y;
+    if (tx < 0 || ty < 0 || tx >= G.map.w || ty >= G.map.h) continue;
+    if (!G.map.visible[ty][tx]) continue;
+    draw_box((int)(ox + G.mons[i].rx * s) - 1, (int)(oy + G.mons[i].ry * s) - 1, 3, 3, 255, 80, 64, 255, true);
+  }
+  /* tana del boss sempre segnalata finche e vivo */
+  if (G.map.has_arena && !G.boss_dead) {
+    double bx = ox + (G.map.arena_cx - G.map.arena_w / 2.0) * s;
+    double by = oy + (G.map.arena_cy - G.map.arena_h / 2.0) * s;
+    double bw = G.map.arena_w * s, bh = G.map.arena_h * s;
+    draw_box((int)bx, (int)by, (int)bw, (int)bh, 232, 80, 40, 36, true);
+    draw_box((int)bx, (int)by, (int)bw, (int)bh, 255, 140, 60, 140, false);
+    double pulse = 0.6 + 0.4 * sin(G.torch_clk * 3.6);
+    int pr = (int)(7 * pulse + 2);
+    if (pr < 2) pr = 2;
+    draw_disc((int)(bx + bw / 2), (int)(by + bh / 2), pr, 255, 120, 50, (Uint8)(200 * pulse));
+    draw_text((int)(bx + bw / 2) - 6, (int)(by + bh / 2) - 8, "!", 2, 255, 210, 122);
+  }
+  /* giocatore pulsante */
+  {
+    double pulse = 2.2 + 0.5 * sin(G.torch_clk * 5);
+    draw_disc((int)(ox + G.p.x * s), (int)(oy + G.p.y * s), (int)pulse + 1, 255, 255, 255, 255);
+  }
+  if (G.view != 0) draw_text(x0 + mw - 90, y0 + 4, "ISOMETRICA", 1, 200, 200, 200);
 }
 
 static void draw_help(void) {
@@ -632,8 +828,8 @@ static void draw_help(void) {
     "SCENDI LE SCALE, APRI FORZIERI,",
     "COMPRA DAL MERCANTE, UCCIDI I 6 BOSS",
     "OGNI 5 PIANI. STANZA 64 = MOD C64.",
-    "MULTI P2P NON DISPONIBILE SU VITA:",
-    "STESSO CODICE = STESSO DUNGEON WEB.",
+    "SOLO OFFLINE SU VITA: MONDO FRESCO",
+    "CASUALE COME NELLA WEB.",
     NULL
   };
   int y = 120;
@@ -649,20 +845,28 @@ static void draw_merchant(void) {
   char b[64];
   snprintf(b, sizeof b, "ORO: %d", G.p.gold);
   draw_text(SCR_W / 2 - 60, SCR_H / 2 - 104, b, 2, 212, 175, 55);
-  const char *items[5] = {"POZIONE HP 10G","POZIONE MANA 8G","ANELLO DANNO 30G","VITA +3 30G","BOTTINO 50G"};
-  for (int i = 0; i < 5; i++) {
+  /* 4 voci come la web, prezzi in base al piano */
+  char items[4][48];
+  snprintf(items[0], sizeof items[0], "POZIONE HP %DG", ab_merchant_price(0));
+  snprintf(items[1], sizeof items[1], "POZIONE MANA %DG", ab_merchant_price(1));
+  snprintf(items[2], sizeof items[2], "POTENZIAM. %DG", ab_merchant_price(2));
+  snprintf(items[3], sizeof items[3], "EQUIP %DG", ab_merchant_price(3));
+  for (int i = 0; i < 4; i++) {
     int y = SCR_H / 2 - 76 + i * 34;
     bool hi = (i == merch_sel);
+    bool afford = G.p.gold >= ab_merchant_price(i);
     draw_box(SCR_W / 2 - 150, y, 300, 28, hi ? 90 : 40, hi ? 60 : 30, hi ? 25 : 15, 255, true);
-    draw_text(SCR_W / 2 - 140, y + 6, items[i], 2, hi ? 255 : 220, hi ? 220 : 200, hi ? 150 : 170);
+    draw_text(SCR_W / 2 - 140, y + 6, items[i], 2,
+      hi ? 255 : (afford ? 220 : 130), hi ? 220 : (afford ? 200 : 130), hi ? 150 : (afford ? 170 : 130));
   }
+  draw_text(SCR_W / 2 - 150, SCR_H / 2 + 70, "TUTTO SVANISCE CON TE ALLA MORTE.", 1, 150, 140, 125);
   if (btn(SCR_W / 2 - 90, SCR_H / 2 + 104, 180, 34, "ESCI [O]", true)) G.merchant_open = false;
 }
 
 static void draw_downed(void) {
   if (!G.p.downed) return;
   char b[64];
-  snprintf(b, sizeof b, "A TERRA! %.0F - BEVI Q!", G.p.downed_t);
+  snprintf(b, sizeof b, "A TERRA! %.0f", G.p.downed_t);
   int tw = text_w(b, 3);
   draw_text(SCR_W / 2 - tw / 2, SCR_H - 160, b, 3, 255, 90, 90);
 }
@@ -703,8 +907,8 @@ static void login_draw(unsigned keys) {
   draw_box(330, 234, 300, 30, login_field == 1 ? 70 : 25, login_field == 1 ? 50 : 20, 20, 255, true);
   draw_box(330, 234, 300, 30, 232, 161, 61, 255, false);
   draw_text(340, 240, osk_buf_room, 2, 170, 255, 238);
-  draw_text(230, 270, "USA 64/C64 PER MOD C64. STESSO", 1, 150, 140, 125);
-  draw_text(230, 284, "CODICE = STESSO DUNGEON DELLA WEB.", 1, 150, 140, 125);
+  draw_text(230, 270, "USA 64/C64 PER MOD C64. MONDO", 1, 150, 140, 125);
+  draw_text(230, 284, "FRESCO CASUALE OGNI RUN.", 1, 150, 140, 125);
 
   if (btn(230, 310, 180, 40, "NOME", login_field == 0)) login_field = 0;
   if (btn(430, 310, 200, 40, "STANZA", login_field == 1)) login_field = 1;
@@ -765,17 +969,16 @@ static void class_draw(unsigned keys) {
     bool hi = (i == class_sel);
     draw_box(cx, cy, cw, chh, hi ? 70 : 25, hi ? 50 : 20, hi ? 25 : 15, 255, true);
     draw_box(cx, cy, cw, chh, hi ? 255 : 150, hi ? 200 : 120, 60, 255, false);
-    /* sprite */
-    const char *base = strrchr(c->sprite, '/');
-    base = base ? base + 1 : c->sprite;
-    static char nb[48];
-    strncpy(nb, base, 47);
-    char *dot = strrchr(nb, '.');
-    if (dot) *dot = 0;
-    SDL_Texture *t = spr_get(nb);
-    if (t) {
-      SDL_Rect d = {cx + 10, cy + 14, 64, 64};
-      SDL_RenderCopy(ren, t, NULL, &d);
+    /* sprite eroe (da sheet come la web) */
+    {
+      SDL_Rect src, *srcp = NULL;
+      bool has = false;
+      SDL_Texture *t = ent_tex_src(c->sprite, &src, &has);
+      if (has) srcp = &src;
+      if (t) {
+        SDL_Rect d = {cx + 10, cy + 14, 64, 64};
+        SDL_RenderCopy(ren, t, srcp, &d);
+      }
     }
     draw_text(cx + 84, cy + 10, c->name, 2, 255, 230, 180);
     char b[64];
@@ -891,8 +1094,8 @@ void ren_frame(unsigned keys) {
       /* su/giu per selezionare, atk per comprare */
       static double last_nav = 0;
       if (G.time - last_nav > 0.18) {
-        if (keys & K_UP) { merch_sel = (merch_sel + 4) % 5; last_nav = G.time; sfx_click(); }
-        else if (keys & K_DOWN) { merch_sel = (merch_sel + 1) % 5; last_nav = G.time; sfx_click(); }
+        if (keys & K_UP) { merch_sel = (merch_sel + 3) % 4; last_nav = G.time; sfx_click(); }
+        else if (keys & K_DOWN) { merch_sel = (merch_sel + 1) % 4; last_nav = G.time; sfx_click(); }
         else if (pressed & K_ATK) {
           if (ab_merchant_buy(merch_sel)) sfx_pickup();
           last_nav = G.time;
@@ -900,7 +1103,7 @@ void ren_frame(unsigned keys) {
       }
       /* click diretto */
       if (in_mouse_pressed) {
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 4; i++) {
           int y = SCR_H / 2 - 76 + i * 34;
           if (in_mouse_x >= SCR_W / 2 - 150 && in_mouse_x < SCR_W / 2 + 150 && in_mouse_y >= y && in_mouse_y < y + 28) {
             in_consume_click();
@@ -933,7 +1136,11 @@ void ren_frame(unsigned keys) {
 
   /* ---- draw ---- */
   if (G.c64) SDL_SetRenderDrawColor(ren, 64, 49, 141, 255);
-  else SDL_SetRenderDrawColor(ren, 10, 9, 6, 255);
+  else {
+    /* sfondo: l'oscurita vira verso il nero-verde man mano che si scende */
+    int dp = G.depth < 30 ? G.depth : 30;
+    SDL_SetRenderDrawColor(ren, 10 + (Uint8)(dp * 0.55), 9 + (Uint8)(dp * 0.35), 6 + (Uint8)(dp * 1.1), 255);
+  }
   SDL_RenderClear(ren);
 
   if (G.state == ST_LOGIN) login_draw(keys);

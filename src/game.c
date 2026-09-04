@@ -1,6 +1,5 @@
-/* ABISSO Vita - logica di gioco (RNG, dungeon, entita, combattimento).
- * Fedelta al JS originale: mulberry32/FNV-1a identici, scaling mostri
- * identico (scaledStat), corridoi a L, boss ogni 5 piani in ordine D,X,L,M,R,K.
+/* ABISSO Vita - logica di gioco 1:1 da index.html.
+ * RNG, scaling, pesi spawn, dungeon, FOV, danni, equip, mercante, boss.
  */
 #include "abisso.h"
 #include <string.h>
@@ -37,6 +36,11 @@ uint32_t ab_hash_str(const char *s) {
     s++;
   }
   return h;
+}
+static uint32_t hash2(const char *a, const char *b, const char *c, int d) {
+  char buf[128];
+  snprintf(buf, sizeof buf, "%s::%s::%s::%d", a, b, c, d);
+  return ab_hash_str(buf);
 }
 void ab_rng_seed(AbRng *r, uint32_t seed) { r->a = seed; }
 double ab_rng_next(AbRng *r) {
@@ -75,12 +79,12 @@ void ab_toast(const char *s) {
   G.toast[127] = '\0';
   G.toast_t = 2.6;
 }
-void ab_loot_banner(const char *s, int rarity) {
+void ab_loot_banner(const char *s, double r, double g, double b) {
   if (!s) return;
   strncpy(G.loot, s, 95);
   G.loot[95] = '\0';
   G.loot_t = 2.6;
-  G.loot_rarity = rarity;
+  G.loot_r = r; G.loot_g = g; G.loot_b = b;
 }
 void ab_float_text(double x, double y, const char *s, double r, double g, double b) {
   for (int i = 0; i < MAX_FLOATS; i++) {
@@ -114,44 +118,42 @@ void ab_burst(double x, double y, int n, double r, double g, double b, double sp
   }
 }
 
-bool ab_is_walkable(int tx, int ty) {
-  if (tx < 0 || ty < 0 || tx >= G.map.w || ty >= G.map.h) return false;
-  return G.map.tiles[ty][tx] != T_WALL;
+static bool in_safe(int tx, int ty) {
+  return tx >= G.map.safe_x && ty >= G.map.safe_y &&
+         tx < G.map.safe_x + G.map.safe_w && ty < G.map.safe_y + G.map.safe_h;
 }
 
-/* movimento con slide + nudge come nel JS */
+bool ab_is_walkable(int tx, int ty) {
+  if (tx < 0 || ty < 0 || tx >= G.map.w || ty >= G.map.h) return false;
+  if (G.map.tiles[ty][tx] == T_WALL) return false;
+  if (G.map.gates_closed) {
+    for (int i = 0; i < G.map.gate_count; i++)
+      if (G.map.gates[i][0] == tx && G.map.gates[i][1] == ty) return false;
+  }
+  return true;
+}
+
+/* movimento con slide + nudge come tryMoveEntity */
 static bool try_move(double *px, double *py, double dx, double dy) {
   double nx = *px + dx, ny = *py + dy;
   int tx = (int)floor(nx), ty = (int)floor(ny);
   if (ab_is_walkable(tx, ty)) { *px = nx; *py = ny; return true; }
-  /* prova singoli assi */
   bool mx = false, my = false;
-  int tx2 = (int)floor(nx), ty0 = (int)floor(*py);
-  if (ab_is_walkable(tx2, ty0)) { *px = nx; mx = true; }
-  int tx0 = (int)floor(*px), ty2 = (int)floor(ny);
-  if (ab_is_walkable(tx0, ty2)) { *py = ny; my = true; }
+  if (ab_is_walkable((int)floor(nx), (int)floor(*py))) { *px = nx; mx = true; }
+  if (ab_is_walkable((int)floor(*px), (int)floor(ny))) { *py = ny; my = true; }
   if (mx || my) return true;
-  /* nudge verso centro cella se diagonale bloccata */
   if (dx != 0 && dy != 0) {
     double cy = floor(*py) + 0.5;
     double diff = cy - *py;
     if (fabs(diff) > 0.02) {
       double nudge = (diff > 0 ? 1 : -1) * fmin(fabs(diff), fabs(dx) * 0.5);
-      int txx = (int)floor(*px), tyy = (int)floor(*py + nudge);
-      if (ab_is_walkable(txx, tyy)) { *py += nudge; return true; }
+      if (ab_is_walkable((int)floor(*px), (int)floor(*py + nudge))) { *py += nudge; return true; }
     }
   }
   return false;
 }
 
 /* ---------------- save/record ---------------- */
-static void ab_save_dir(char *out, size_t n) {
-#ifdef ABISSO_VITA
-  snprintf(out, n, "ux0:data/ABISSO");
-#else
-  snprintf(out, n, ".");
-#endif
-}
 static void ab_save_file(char *out, size_t n) {
 #ifdef ABISSO_VITA
   snprintf(out, n, "ux0:data/ABISSO/save.txt");
@@ -160,14 +162,13 @@ static void ab_save_file(char *out, size_t n) {
 #endif
 }
 void ab_save_record(void) {
-  char dir[128], file[160];
-  ab_save_dir(dir, sizeof dir);
+  char file[160];
   ab_save_file(file, sizeof file);
 #ifdef ABISSO_VITA
 #ifdef _WIN32
-  _mkdir(dir);
+  _mkdir("ux0:data/ABISSO");
 #else
-  mkdir(dir, 0777);
+  mkdir("ux0:data/ABISSO", 0777);
 #endif
 #endif
   FILE *f = fopen(file, "w");
@@ -228,17 +229,17 @@ void ab_new_run(const char *name, int cls, const char *room) {
   if (room && room[0]) { strncpy(G.room, room, MAX_ROOM - 1); G.room[MAX_ROOM-1] = 0; }
   if (cls >= 0 && cls < CLS_COUNT) G.p.cls = cls;
   G.c64 = room_is_c64(G.room);
-  G.world_seed = ab_hash_str(G.room);
+  /* mondo fresco come bootstrapFreshWorld: seed casuale */
+  G.world_seed = ((uint32_t)rand() << 16) ^ (uint32_t)rand() ^ (uint32_t)(G.time * 1000 + 1);
+  if (G.world_seed == 0) G.world_seed = 0x12345678;
   G.depth = 1;
   G.state = ST_GAME;
   G.minimap = false; G.help = false; G.merchant_open = false;
-  G.boss_active = false;
-  G.arena_locked = false;
-  /* reset equip/stats base */
+  G.boss_active = false; G.boss_dead = false;
   memset(G.p.equip, 0, sizeof G.p.equip);
-  G.p.gold = 0; G.p.potions = 1; G.p.mana_potions = 1;
-  G.p.xp = 0; G.p.level = 1;
-  G.p.buff_rage_t = G.p.buff_shield_t = G.p.buff_haste_t = 0;
+  for (int i = 0; i < BUFF_COUNT; i++) G.p.buffs[i] = 0;
+  G.p.gold = 0; G.p.potions = 1; G.p.mana_potions = 0;
+  G.p.poison_t = 0; G.p.web_t = 0;
   G.p.dead = false; G.p.downed = false;
   ab_gen_depth(1);
   const AbClassDef *c = ab_class_def(G.p.cls);
@@ -246,11 +247,11 @@ void ab_new_run(const char *name, int cls, const char *room) {
   snprintf(b, sizeof b, "Benvenuto, %s %s! Stanza '%s'", c->name, G.p.name, G.room);
   ab_add_log(b);
   ab_toast(G.c64 ? "MODALITA' C64!" : "L'abisso ti attende...");
-  if (G.c64) ab_add_log("Easter egg C64 attivo: sprite e suoni 8-bit.");
-  ab_add_log("OFFLINE Vita: single-player. Stesso seed della web.");
+  if (G.c64) ab_add_log("Easter egg C64 attivo.");
+  ab_add_log("OFFLINE Vita: single-player, mondo fresco casuale.");
 }
 
-/* ---------------- dungeon gen ---------------- */
+/* ---------------- dungeon 1:1 ---------------- */
 typedef struct { int x, y, w, h, cx, cy; } Room;
 
 static void carve_h(AbMap *m, int x0, int x1, int y) {
@@ -263,526 +264,644 @@ static void carve_v(AbMap *m, int y0, int y1, int x) {
   for (int y = y0; y <= y1; y++)
     if (x > 0 && y > 0 && x < m->w - 1 && y < m->h - 1) m->tiles[y][x] = T_FLOOR;
 }
+static void carve_corr(AbMap *m, AbRng *rng, int ax, int ay, int bx, int by) {
+  if (ab_rng_next(rng) < 0.5) { carve_h(m, ax, bx, ay); carve_v(m, ay, by, bx); }
+  else { carve_v(m, ay, by, ax); carve_h(m, ax, bx, by); }
+}
+
+/* stanze temporanee della gen (max 40) */
+#define GEN_MAX_ROOMS 40
+static Room gen_rooms[GEN_MAX_ROOMS];
+static int gen_nr;
+/* spot temporanei */
+static int mon_spots[128][2]; static int mon_spot_n;
+static int tre_spots[64][3]; static int tre_spot_n;
+static int pow_spots[16][2]; static int pow_spot_n;
+static int pot_spots[32][2]; static int pot_spot_n; static int pot_mana[32];
+static int chest_x[24], chest_y[24], chest_boss[24]; static int chest_spot_n;
+
+static void bfs_fill(AbMap *m, int sx, int sy, int16_t *dist) {
+  int W = m->w, H = m->h;
+  for (int i = 0; i < W * H; i++) dist[i] = -1;
+  if (sx < 0 || sy < 0 || sx >= W || sy >= H) return;
+  if (m->tiles[sy][sx] == T_WALL) return;
+  int qx[MAP_MAX_W * MAP_MAX_H], qy[MAP_MAX_W * MAP_MAX_H];
+  int head = 0, tail = 0;
+  qx[tail] = sx; qy[tail] = sy; tail++;
+  dist[sy * W + sx] = 0;
+  while (head < tail) {
+    int cx = qx[head], cy = qy[head]; head++;
+    int d = dist[cy * W + cx];
+    const int dx[4] = {1,-1,0,0}, dy[4] = {0,0,1,-1};
+    for (int k = 0; k < 4; k++) {
+      int nx = cx + dx[k], ny = cy + dy[k];
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      if (m->tiles[ny][nx] == T_WALL) continue;
+      if (dist[ny * W + nx] != -1) continue;
+      dist[ny * W + nx] = (int16_t)(d + 1);
+      qx[tail] = nx; qy[tail] = ny; tail++;
+    }
+  }
+}
 
 void ab_gen_depth(int depth) {
   G.depth = depth;
   AbMap *m = &G.map;
   memset(m, 0, sizeof *m);
+  char seedstr[32];
+  snprintf(seedstr, sizeof seedstr, "%u", G.world_seed);
   AbRng rng;
-  ab_rng_seed(&rng, G.world_seed + (uint32_t)depth * 7919u + 13u);
+  ab_rng_seed(&rng, hash2(G.room, seedstr, "layout", depth));
 
-  m->w = 40 + depth * 2;
-  if (m->w > MAP_MAX_W) m->w = MAP_MAX_W;
-  m->h = 40 + depth * 2;
-  if (m->h > MAP_MAX_H) m->h = MAP_MAX_H;
+  int W = 78 + depth * 3; if (W < 78) W = 78; if (W > 130) W = 130;
+  int H = 44 + depth * 2; if (H < 44) H = 44; if (H > 74) H = 74;
+  m->w = W; m->h = H;
 
-  Room rooms[14];
-  int nr = 0;
-  int tries = 0;
-  int want = 8 + ab_rng_range(&rng, 0, 3);
-  while (nr < want && tries < 200) {
-    tries++;
-    int rw = ab_rng_range(&rng, 5, 10);
-    int rh = ab_rng_range(&rng, 5, 9);
-    int rx = ab_rng_range(&rng, 2, m->w - rw - 3);
-    int ry = ab_rng_range(&rng, 2, m->h - rh - 3);
-    bool ov = false;
-    for (int i = 0; i < nr; i++) {
-      if (rx < rooms[i].x + rooms[i].w + 1 && rx + rw + 1 > rooms[i].x &&
-          ry < rooms[i].y + rooms[i].h + 1 && ry + rh + 1 > rooms[i].y) { ov = true; break; }
+  gen_nr = 0;
+  int maxRooms = 11 + (depth * 7) / 10;
+  int attempts = 0;
+  while (gen_nr < maxRooms && attempts < 500 && gen_nr < GEN_MAX_ROOMS) {
+    attempts++;
+    int rw = 4 + ab_rng_range(&rng, 0, 6);
+    int rh = 3 + ab_rng_range(&rng, 0, 4);
+    int rx = 1 + ab_rng_range(&rng, 0, W - rw - 3);
+    int ry = 1 + ab_rng_range(&rng, 0, H - rh - 3);
+    bool ok = true;
+    for (int i = 0; i < gen_nr; i++) {
+      Room *r = &gen_rooms[i];
+      if (rx - 1 < r->x + r->w + 1 && rx + rw + 1 > r->x - 1 &&
+          ry - 1 < r->y + r->h + 1 && ry + rh + 1 > r->y - 1) { ok = false; break; }
     }
-    if (ov) continue;
-    rooms[nr].x = rx; rooms[nr].y = ry;
-    rooms[nr].w = rw; rooms[nr].h = rh;
-    rooms[nr].cx = rx + rw / 2; rooms[nr].cy = ry + rh / 2;
-    nr++;
+    if (!ok) continue;
+    gen_rooms[gen_nr].x = rx; gen_rooms[gen_nr].y = ry;
+    gen_rooms[gen_nr].w = rw; gen_rooms[gen_nr].h = rh;
+    gen_rooms[gen_nr].cx = rx + rw / 2; gen_rooms[gen_nr].cy = ry + rh / 2;
+    gen_nr++;
     for (int y = ry; y < ry + rh; y++)
       for (int x = rx; x < rx + rw; x++) m->tiles[y][x] = T_FLOOR;
   }
-  if (nr < 2) { /* fallback: apri tutto centrale */
-    for (int y = 4; y < m->h - 4; y++)
-      for (int x = 4; x < m->w - 4; x++) m->tiles[y][x] = T_FLOOR;
-    rooms[0].cx = 6; rooms[0].cy = 6;
-    rooms[1].cx = m->w - 7; rooms[1].cy = m->h - 7;
-    nr = 2;
+  if (gen_nr == 0) {
+    int rw = 8, rh = 6, rx = (W >> 1) - 4, ry = (H >> 1) - 3;
+    gen_rooms[0].x = rx; gen_rooms[0].y = ry;
+    gen_rooms[0].w = rw; gen_rooms[0].h = rh;
+    gen_rooms[0].cx = rx + rw / 2; gen_rooms[0].cy = ry + rh / 2;
+    gen_nr = 1;
+    for (int y = ry; y < ry + rh; y++)
+      for (int x = rx; x < rx + rw; x++) m->tiles[y][x] = T_FLOOR;
   }
-  for (int i = 1; i < nr; i++) {
-    int ax = rooms[i-1].cx, ay = rooms[i-1].cy;
-    int bx = rooms[i].cx, by = rooms[i].cy;
-    if (ab_rng_next(&rng) < 0.5) { carve_h(m, ax, bx, ay); carve_v(m, ay, by, bx); }
-    else { carve_v(m, ay, by, ax); carve_h(m, ax, bx, by); }
+  for (int i = 1; i < gen_nr; i++)
+    carve_corr(m, &rng, gen_rooms[i-1].cx, gen_rooms[i-1].cy, gen_rooms[i].cx, gen_rooms[i].cy);
+  int extraLoops = (gen_nr * 3) / 10;
+  for (int k = 0; k < extraLoops; k++) {
+    int a = ab_rng_range(&rng, 0, gen_nr - 1), b = ab_rng_range(&rng, 0, gen_nr - 1);
+    if (a != b) carve_corr(m, &rng, gen_rooms[a].cx, gen_rooms[a].cy, gen_rooms[b].cx, gen_rooms[b].cy);
   }
 
-  m->spawn_x = rooms[0].cx; m->spawn_y = rooms[0].cy;
-  m->stairs_x = rooms[nr-1].cx; m->stairs_y = rooms[nr-1].cy;
-  m->tiles[m->stairs_y][m->stairs_x] = T_STAIRS;
-  m->merch_x = rooms[0].x + 1; m->merch_y = rooms[0].y + 1;
-
-  /* arena boss in fondo su piani boss */
+  /* arena boss isolata */
   m->has_arena = false;
+  int arena_cx = 0, arena_cy = 0;
   if (ab_is_boss_floor(depth)) {
-    int aw = 16, ah = 11;
-    int ax = (m->w - aw) / 2;
-    int ay = m->h - ah - 3;
-    if (ax < 2) ax = 2;
-    if (ay < 2) ay = 2;
-    for (int y = ay; y < ay + ah && y < m->h - 1; y++)
-      for (int x = ax; x < ax + aw && x < m->w - 1; x++) m->tiles[y][x] = T_FLOOR;
-    /* corridoio verso arena */
-    carve_v(m, rooms[nr-1].cy, ay + ah / 2, ax + aw / 2);
-    m->arena_cx = ax + aw / 2; m->arena_cy = ay + ah / 2;
-    m->arena_w = aw; m->arena_h = ah;
-    m->has_arena = true;
+    for (int tries = 0; tries < 100 && !m->has_arena; tries++) {
+      int bw = 12 + ab_rng_range(&rng, 0, 5), bh = 8 + ab_rng_range(&rng, 0, 4);
+      int bx = 3 + ab_rng_range(&rng, 0, W - bw - 7);
+      int by = 3 + ab_rng_range(&rng, 0, H - bh - 7);
+      bool ok = true;
+      for (int i = 0; i < gen_nr && ok; i++) {
+        Room *r = &gen_rooms[i];
+        if (bx - 2 < r->x + r->w + 2 && bx + bw + 2 > r->x - 2 &&
+            by - 2 < r->y + r->h + 2 && by + bh + 2 > r->y - 2) ok = false;
+      }
+      for (int y = by; y < by + bh && ok; y++)
+        for (int x = bx; x < bx + bw; x++)
+          if (m->tiles[y][x] != T_WALL) ok = false;
+      for (int y = by - 1; y <= by + bh && ok; y++)
+        for (int x = bx - 1; x <= bx + bw; x++) {
+          bool inside = x >= bx && x < bx + bw && y >= by && y < by + bh;
+          if (x < 0 || y < 0 || x >= W || y >= H) continue;
+          if (!inside && m->tiles[y][x] != T_WALL) ok = false;
+        }
+      if (!ok) continue;
+      for (int y = by; y < by + bh; y++)
+        for (int x = bx; x < bx + bw; x++) m->tiles[y][x] = T_FLOOR;
+      arena_cx = bx + (bw >> 1); arena_cy = by + (bh >> 1);
+      m->arena_cx = arena_cx; m->arena_cy = arena_cy;
+      m->arena_w = bw; m->arena_h = bh;
+      m->arena_boss = ab_boss_for_depth(depth);
+      m->has_arena = true;
+      int ni = 0, nd = 1 << 30;
+      for (int i = 0; i < gen_nr; i++) {
+        int d = abs(gen_rooms[i].cx - arena_cx) + abs(gen_rooms[i].cy - arena_cy);
+        if (d < nd) { nd = d; ni = i; }
+      }
+      carve_corr(m, &rng, arena_cx, arena_cy, gen_rooms[ni].cx, gen_rooms[ni].cy);
+      m->gate_count = 0;
+      for (int y = by - 1; y <= by + bh && m->gate_count < MAX_GATES; y++)
+        for (int x = bx - 1; x <= bx + bw && m->gate_count < MAX_GATES; x++) {
+          bool inside = x >= bx && x < bx + bw && y >= by && y < by + bh;
+          if (inside || x < 0 || y < 0 || x >= W || y >= H) continue;
+          if (m->tiles[y][x] == T_FLOOR) {
+            m->gates[m->gate_count][0] = x;
+            m->gates[m->gate_count][1] = y;
+            m->gate_count++;
+          }
+        }
+      /* forziere boss contro parete */
+      int fx = bx + 1 + (bw > 2 ? ab_rng_range(&rng, 0, bw - 3) : 0);
+      int fy = (by + 4 >= arena_cy) ? by + bh - 2 : by + 1;
+      chest_x[0] = fx; chest_y[0] = fy; chest_boss[0] = 1;
+      chest_spot_n = 1;
+    }
+    if (!m->has_arena) chest_spot_n = 0;
+  } else {
+    chest_spot_n = 0;
   }
 
-  /* torce: lungo i muri */
+  Room *r0 = &gen_rooms[0];
+  m->spawn_x = r0->cx; m->spawn_y = r0->cy;
+  m->safe_x = r0->x; m->safe_y = r0->y; m->safe_w = r0->w; m->safe_h = r0->h;
+  m->merch_x = r0->x + (r0->w - 2 > 1 ? r0->w - 2 : 1);
+  m->merch_y = r0->y + (r0->h / 2);
+  if (m->merch_x == m->spawn_x && m->merch_y == m->spawn_y) m->merch_x = r0->x + 1;
+
+  static int16_t distmap[MAP_MAX_W * MAP_MAX_H];
+  bfs_fill(m, m->spawn_x, m->spawn_y, distmap);
+  int stairs_i = gen_nr - 1, best = -1;
+  for (int i = 0; i < gen_nr; i++) {
+    int c = gen_rooms[i].cy * W + gen_rooms[i].cx;
+    int d = (gen_rooms[i].cx >= 0 && gen_rooms[i].cy >= 0) ? distmap[c] : -1;
+    if (d > best) { best = d; stairs_i = i; }
+  }
+  m->stairs_x = gen_rooms[stairs_i].cx;
+  m->stairs_y = gen_rooms[stairs_i].cy;
+  m->tiles[m->stairs_y][m->stairs_x] = T_STAIRS;
+
+  /* forzieri normali */
+  int numChests = 3 + depth / 2, ct = 0;
+  while (chest_spot_n < numChests && ct < 300 && gen_nr > 1) {
+    ct++;
+    int ri = 1 + ab_rng_range(&rng, 0, gen_nr - 2);
+    Room *r = &gen_rooms[ri];
+    int x = r->x + 1 + ab_rng_range(&rng, 0, (r->w - 2 > 1 ? r->w - 2 : 1) - 1);
+    int y = r->y + 1 + ab_rng_range(&rng, 0, (r->h - 2 > 1 ? r->h - 2 : 1) - 1);
+    if (m->tiles[y][x] != T_FLOOR) continue;
+    if (x == m->spawn_x && y == m->spawn_y) continue;
+    if (x == m->merch_x && y == m->merch_y) continue;
+    bool dup = false;
+    for (int i = 0; i < chest_spot_n; i++)
+      if (chest_x[i] == x && chest_y[i] == y) { dup = true; break; }
+    if (dup) continue;
+    if (chest_spot_n >= 24) break;
+    chest_x[chest_spot_n] = x; chest_y[chest_spot_n] = y; chest_boss[chest_spot_n] = 0;
+    chest_spot_n++;
+  }
+
+  /* spot mostri: stanze 1.., 1+floor(rng*3) per stanza */
+  mon_spot_n = 0;
+  for (int ri = 1; ri < gen_nr && mon_spot_n < 128; ri++) {
+    Room *r = &gen_rooms[ri];
+    int count = 1 + ab_rng_range(&rng, 0, 2);
+    for (int k = 0; k < count && mon_spot_n < 128; k++) {
+      int x = r->x + 1 + ab_rng_range(&rng, 0, (r->w - 2 > 1 ? r->w - 2 : 1) - 1);
+      int y = r->y + 1 + ab_rng_range(&rng, 0, (r->h - 2 > 1 ? r->h - 2 : 1) - 1);
+      if (m->tiles[y][x] != T_FLOOR) continue;
+      mon_spots[mon_spot_n][0] = x; mon_spots[mon_spot_n][1] = y;
+      mon_spot_n++;
+    }
+  }
+
+  /* tesori */
+  tre_spot_n = 0;
+  int numTre = 4 + depth / 2, tt = 0;
+  while (tre_spot_n < numTre && tt < 300) {
+    tt++;
+    Room *r = &gen_rooms[ab_rng_range(&rng, 0, gen_nr - 1)];
+    int x = r->x + 1 + ab_rng_range(&rng, 0, (r->w - 2 > 1 ? r->w - 2 : 1) - 1);
+    int y = r->y + 1 + ab_rng_range(&rng, 0, (r->h - 2 > 1 ? r->h - 2 : 1) - 1);
+    if (m->tiles[y][x] != T_FLOOR) continue;
+    if (x == m->spawn_x && y == m->spawn_y) continue;
+    if (x == m->merch_x && y == m->merch_y) continue;
+    tre_spots[tre_spot_n][0] = x; tre_spots[tre_spot_n][1] = y;
+    tre_spots[tre_spot_n][2] = ab_rng_next(&rng) < 0.18 ? 1 : 0;
+    tre_spot_n++;
+  }
+
+  /* powerup spots (3) */
+  pow_spot_n = 0;
+  int pt = 0;
+  while (pow_spot_n < 3 && pt < 200 && gen_nr > 1) {
+    pt++;
+    Room *r = &gen_rooms[1 + ab_rng_range(&rng, 0, gen_nr - 2)];
+    int x = r->x + 1 + ab_rng_range(&rng, 0, (r->w - 2 > 1 ? r->w - 2 : 1) - 1);
+    int y = r->y + 1 + ab_rng_range(&rng, 0, (r->h - 2 > 1 ? r->h - 2 : 1) - 1);
+    if (m->tiles[y][x] != T_FLOOR) continue;
+    pow_spots[pow_spot_n][0] = x; pow_spots[pow_spot_n][1] = y;
+    pow_spot_n++;
+  }
+
+  /* pozioni a terra */
+  pot_spot_n = 0;
+  int numPot = 3 + depth / 3, pot = 0;
+  while (pot_spot_n < numPot && pot < 250) {
+    pot++;
+    Room *r = &gen_rooms[ab_rng_range(&rng, 0, gen_nr - 1)];
+    int x = r->x + 1 + ab_rng_range(&rng, 0, (r->w - 2 > 1 ? r->w - 2 : 1) - 1);
+    int y = r->y + 1 + ab_rng_range(&rng, 0, (r->h - 2 > 1 ? r->h - 2 : 1) - 1);
+    if (m->tiles[y][x] != T_FLOOR) continue;
+    if (x == m->merch_x && y == m->merch_y) continue;
+    pot_spots[pot_spot_n][0] = x; pot_spots[pot_spot_n][1] = y;
+    pot_mana[pot_spot_n] = ab_rng_next(&rng) < 0.45 ? 1 : 0;
+    pot_spot_n++;
+  }
+
+  /* torce sull'anello di muri attorno alle stanze */
   G.torch_count = 0;
-  for (int y = 2; y < m->h - 2 && G.torch_count < MAX_TORCHES; y++) {
-    for (int x = 2; x < m->w - 2 && G.torch_count < MAX_TORCHES; x++) {
-      if (m->tiles[y][x] == T_FLOOR && ab_rng_next(&rng) < 0.02) {
-        /* vicino a un muro? */
-        if (m->tiles[y-1][x] == T_WALL || m->tiles[y+1][x] == T_WALL ||
-            m->tiles[y][x-1] == T_WALL || m->tiles[y][x+1] == T_WALL) {
-          G.torches[G.torch_count].tx = x;
-          G.torches[G.torch_count].ty = y;
-          G.torch_count++;
-        }
-      }
+  for (int ri = 0; ri < gen_nr && G.torch_count < MAX_TORCHES; ri++) {
+    Room *r = &gen_rooms[ri];
+    int n = ri == 0 ? 3 : 1 + ab_rng_range(&rng, 0, 2);
+    int x0 = r->x - 1, x1 = r->x + r->w, y0 = r->y - 1, y1 = r->y + r->h;
+    int placed = 0, tr = 0;
+    while (placed < n && tr < 60) {
+      tr++;
+      int edge = ab_rng_range(&rng, 0, 3), x, y;
+      if (edge == 0) { x = x0; y = y0 + 1 + ab_rng_range(&rng, 0, (r->h - 2 > 1 ? r->h - 2 : 1) - 1); }
+      else if (edge == 1) { x = x1; y = y0 + 1 + ab_rng_range(&rng, 0, (r->h - 2 > 1 ? r->h - 2 : 1) - 1); }
+      else if (edge == 2) { y = y0; x = x0 + 1 + ab_rng_range(&rng, 0, (r->w - 2 > 1 ? r->w - 2 : 1) - 1); }
+      else { y = y1; x = x0 + 1 + ab_rng_range(&rng, 0, (r->w - 2 > 1 ? r->w - 2 : 1) - 1); }
+      if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) continue;
+      if (m->tiles[y][x] != T_WALL) continue;
+      bool dup = false;
+      for (int i = 0; i < G.torch_count; i++)
+        if (G.torches[i].tx == x && G.torches[i].ty == y) { dup = true; break; }
+      if (dup) continue;
+      G.torches[G.torch_count].tx = x;
+      G.torches[G.torch_count].ty = y;
+      G.torch_count++;
+      placed++;
+    }
+  }
+
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) { m->visited[y][x] = 0; m->visible[y][x] = 0; }
+
+  /* giocatore (tiene % hp a cambio piano) */
+  const AbClassDef *cd = ab_class_def(G.p.cls);
+  int eq_hp, eq_dp, eq_sp, eq_ap;
+  ab_equip_bonus(&eq_hp, &eq_dp, &eq_sp, &eq_ap);
+  double keep = 1.0;
+  if (depth > 1 && G.p.max_hp > 0 && G.p.hp > 0) keep = (double)G.p.hp / (double)G.p.max_hp;
+  G.p.max_hp = cd->hp + eq_hp;
+  G.p.hp = (int)(G.p.max_hp * keep + 0.5);
+  if (G.p.hp < 1) G.p.hp = 1;
+  G.p.max_mp = cd->max_mp; G.p.mp = cd->max_mp;
+  G.p.x = G.p.rx = m->spawn_x + 0.5;
+  G.p.y = G.p.ry = m->spawn_y + 0.5;
+  G.p.fx = 0; G.p.fy = 1;
+  G.p.atk_cd = 0; G.p.ability_cd = 0; G.p.iframes = 0; G.p.anim_t = 0; G.p.charge_t = 0;
+  G.p.poison_t = 0; G.p.web_t = 0;
+  G.p.downed = false; G.p.dead = false;
+
+  for (int i = 0; i < MAX_MONSTERS; i++) G.mons[i].active = false;
+  for (int i = 0; i < MAX_PROJS; i++) G.projs[i].active = false;
+  for (int i = 0; i < MAX_PARTS; i++) G.parts[i].active = false;
+  for (int i = 0; i < MAX_FLOATS; i++) G.floats[i].active = false;
+  for (int i = 0; i < MAX_ITEMS; i++) G.items[i].active = false;
+  G.item_count = 0;
+
+  /* spawn dinamico: rng dyn + affix solo al piano 1 */
+  AbRng drng;
+  ab_rng_seed(&drng, hash2(G.room, seedstr, "dyn", depth));
+  int mi = 0;
+  for (int i = 0; i < mon_spot_n && mi < MAX_MONSTERS - 8; i++) {
+    /* pesi 1:1 */
+    static const char pool[] = {'r','b','g','j','J','s','o','z','S','W','k','h','C','c','m','q','G'};
+    int tot = 0;
+    for (size_t k = 0; k < sizeof pool; k++) tot += ab_mon_weight(pool[k], depth);
+    if (tot <= 0) break;
+    int roll = 1 + (int)(ab_rng_next(&drng) * tot);
+    char tk = 'g';
+    for (size_t k = 0; k < sizeof pool; k++) {
+      roll -= ab_mon_weight(pool[k], depth);
+      if (roll <= 0) { tk = pool[k]; break; }
+    }
+    const AbMonDef *td = ab_mon_def(tk);
+    if (!td) continue;
+    int affix = 0;
+    if (depth == 1) {
+      char ab[32];
+      snprintf(ab, sizeof ab, "%d_%d::affix", depth, i);
+      AbRng arng; ab_rng_seed(&arng, ab_hash_str(ab));
+      double chance = 0.1 + depth * 0.018;
+      if (chance > 0.4) chance = 0.4;
+      if (ab_rng_next(&arng) < chance) affix = 1 + (int)(ab_rng_next(&arng) * 3);
+    }
+    AbMonster *mm = &G.mons[mi++];
+    mm->active = true;
+    mm->type = tk;
+    mm->x = mm->rx = mon_spots[i][0] + 0.5;
+    mm->y = mm->ry = mon_spots[i][1] + 0.5;
+    mm->max_hp = mm->hp = ab_scaled_stat(td->hp, depth, 0.16);
+    mm->dmg = ab_scaled_stat(td->dmg, depth, 0.11);
+    mm->speed = td->speed;
+    mm->aggro = td->aggro;
+    mm->facing_x = 0; mm->facing_y = 1;
+    mm->atk_cd = 0; mm->wander_t = 0; mm->wx = 0; mm->wy = 0;
+    mm->dot_t = 0; mm->dot_acc = 0; mm->regen_acc = 0;
+    mm->affix = affix;
+    if (affix == 1) mm->speed *= 1.6;
+    mm->is_boss = false;
+    mm->spec_cd = 0; mm->breath_cd = 0; mm->fb_cd = 0; mm->fly_cd = 0;
+    mm->fly_t = 0; mm->dive_t = 0; mm->summon_left = 0; mm->flying = false;
+    mm->fx_mode = 0; mm->fx_t = 0; mm->fx_dur = 0; mm->fx_hit = false; mm->dent_t = 0;
+  }
+  /* boss */
+  G.boss_active = false; G.boss_dead = false;
+  m->gates_closed = false;
+  if (m->has_arena) {
+    const AbMonDef *td = ab_mon_def(m->arena_boss);
+    if (td && mi < MAX_MONSTERS) {
+      AbMonster *mm = &G.mons[mi++];
+      mm->active = true;
+      mm->type = m->arena_boss;
+      mm->x = mm->rx = arena_cx + 0.5;
+      mm->y = mm->ry = arena_cy + 0.5;
+      mm->max_hp = mm->hp = ab_scaled_stat(td->hp, depth, 0.10);
+      mm->dmg = ab_scaled_stat(td->dmg, depth, 0.08);
+      mm->speed = td->speed;
+      mm->aggro = 99;
+      mm->is_boss = true;
+      mm->affix = 0;
+      mm->atk_cd = 0;
+      mm->spec_cd = 2.5; mm->breath_cd = 2.0; mm->fb_cd = 3.0; mm->fly_cd = 8.5;
+      mm->fly_t = 0; mm->dive_t = 0; mm->flying = false;
+      mm->summon_left = td->summon ? td->summon_n : 0;
+      mm->fx_mode = 0; mm->dent_t = 0;
+      strncpy(G.boss_name, td->name, sizeof G.boss_name - 1);
+      G.boss_hp = mm->hp; G.boss_max = mm->max_hp;
     }
   }
 
   /* forzieri */
   G.chest_count = 0;
-  int nch = 3 + ab_rng_range(&rng, 0, 2);
-  for (int i = 0; i < nch && G.chest_count < MAX_CHESTS; i++) {
-    int ri = ab_rng_range(&rng, 1, nr - 1);
-    int tx = rooms[ri].x + ab_rng_range(&rng, 0, rooms[ri].w - 1);
-    int ty = rooms[ri].y + ab_rng_range(&rng, 0, rooms[ri].h - 1);
-    if (m->tiles[ty][tx] != T_FLOOR) continue;
-    if ((tx == m->stairs_x && ty == m->stairs_y)) continue;
+  for (int i = 0; i < chest_spot_n && G.chest_count < MAX_CHESTS; i++) {
     AbChest *c = &G.chests[G.chest_count++];
-    c->active = true; c->tx = tx; c->ty = ty; c->open = false;
-    double f = ab_rng_next(&rng);
-    if (f < 0.45) { c->kind = 0; c->gold = ab_rng_range(&rng, 5 + depth * 2, 15 + depth * 4); }
-    else if (f < 0.65) c->kind = 1;
-    else if (f < 0.8) c->kind = 2;
-    else c->kind = 3;
-    double rf = ab_rng_next(&rng);
-    c->rarity = rf < 0.6 ? 0 : rf < 0.85 ? 1 : rf < 0.96 ? 2 : 3;
-    if (c->kind == 3 && c->rarity == 0 && ab_rng_next(&rng) < 0.5) c->rarity = 1;
+    c->active = true;
+    c->tx = chest_x[i]; c->ty = chest_y[i];
+    c->open = false;
+    c->boss_chest = chest_boss[i] ? true : false;
+    snprintf(c->id, sizeof c->id, "c%d_%d_%d", depth, c->tx, c->ty);
   }
 
-  /* reset visibilita */
+  /* oggetti iniziali 1:1 */
+  for (int i = 0; i < tre_spot_n && G.item_count < MAX_ITEMS; i++) {
+    AbItem *it = &G.items[G.item_count++];
+    it->active = true;
+    it->x = tre_spots[i][0] + 0.5; it->y = tre_spots[i][1] + 0.5;
+    if (tre_spots[i][2]) { it->kind = 1; it->amount = 15 + ab_rng_range(&drng, 0, 10 * depth - 1 > 0 ? 10 * depth - 1 : 0); }
+    else { it->kind = 0; it->amount = 3 + ab_rng_range(&drng, 0, 6 * depth - 1 > 0 ? 6 * depth - 1 : 0); }
+  }
+  if (pow_spot_n > 0 && G.item_count < MAX_ITEMS) {
+    int si = ab_rng_range(&drng, 0, pow_spot_n - 1);
+    AbItem *it = &G.items[G.item_count++];
+    it->active = true;
+    it->x = pow_spots[si][0] + 0.5; it->y = pow_spots[si][1] + 0.5;
+    it->kind = 2; it->buff = ab_rng_range(&drng, 0, BUFF_COUNT - 1);
+  }
+  for (int i = 0; i < pot_spot_n && G.item_count < MAX_ITEMS; i++) {
+    AbItem *it = &G.items[G.item_count++];
+    it->active = true;
+    it->x = pot_spots[i][0] + 0.5; it->y = pot_spots[i][1] + 0.5;
+    it->kind = pot_mana[i] ? 4 : 3; it->amount = 1;
+  }
+  ab_update_fov();
+}
+
+/* ---------------- FOV Bresenham R 7.4 ---------------- */
+static void cast_ray(AbMap *m, int x0, int y0, int x1, int y1) {
+  int dx = abs(x1 - x0), dy = -abs(y1 - y0);
+  int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  int err = dx + dy, x = x0, y = y0;
+  int W = m->w, H = m->h;
+  while (true) {
+    if (x >= 0 && y >= 0 && x < W && y < H) {
+      m->visible[y][x] = 1;
+      if (m->tiles[y][x] == T_WALL) break;
+    } else break;
+    if (x == x1 && y == y1) break;
+    int e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x += sx; }
+    if (e2 <= dx) { err += dx; y += sy; }
+  }
+}
+void ab_update_fov(void) {
+  AbMap *m = &G.map;
   for (int y = 0; y < m->h; y++)
-    for (int x = 0; x < m->w; x++) m->visited[y][x] = 0;
-
-  /* giocatore */
-  const AbClassDef *cd = ab_class_def(G.p.cls);
-  int eq_hp = 0; double eq_spd = 0;
-  for (int i = 0; i < 5; i++) { eq_hp += G.p.equip[i].hp; eq_spd += G.p.equip[i].speed; }
-  /* a cambio piano tieni hp% */
-  double keep = 1.0;
-  if (G.p.max_hp > 0 && G.p.hp > 0) keep = (double)G.p.hp / (double)G.p.max_hp;
-  if (depth == 1) keep = 1.0;
-  G.p.max_hp = cd->hp + eq_hp;
-  G.p.hp = (int)(G.p.max_hp * keep + 0.5);
-  if (G.p.hp < 1) G.p.hp = 1;
-  G.p.max_mp = cd->max_mp; G.p.mp = cd->max_mp;
-  G.p.speed = cd->speed + eq_spd;
-  G.p.x = G.p.rx = m->spawn_x + 0.5;
-  G.p.y = G.p.ry = m->spawn_y + 0.5;
-  G.p.fx = 0; G.p.fy = 1;
-  G.p.atk_cd = 0; G.p.ability_cd = 0; G.p.iframes = 0; G.p.anim_t = 0; G.p.charge_t = 0;
-  G.p.downed = false; G.p.dead = false;
-
-  /* mostri */
-  for (int i = 0; i < MAX_MONSTERS; i++) G.mons[i].active = false;
-  for (int i = 0; i < MAX_PROJS; i++) G.projs[i].active = false;
-  for (int i = 0; i < MAX_PARTS; i++) G.parts[i].active = false;
-  for (int i = 0; i < MAX_FLOATS; i++) G.floats[i].active = false;
-
-  /* pesi come nel JS */
-  struct { char k; int w; } pool[24];
-  int pn = 0;
-  int d = depth;
-#define ADDW(_k,_w) do { if ((_w) > 0 && pn < 24) { pool[pn].k = (_k); pool[pn].w = (_w); pn++; } } while(0)
-  ADDW('r', d < 10 ? 10 - d : 0);
-  ADDW('b', d < 9 ? 9 - d : 0);
-  ADDW('g', 8);
-  ADDW('j', d >= 2 ? 6 : 2);
-  ADDW('J', d >= 2 ? 5 : 1);
-  ADDW('s', d >= 2 ? 9 : 2);
-  ADDW('o', d >= 3 ? 8 : 1);
-  ADDW('z', d >= 3 ? 7 : 1);
-  ADDW('S', d >= 4 ? 7 : 0);
-  ADDW('W', d >= 5 ? 6 : 0);
-  ADDW('k', 7);
-  ADDW('c', d >= 2 ? 6 : 1);
-  ADDW('h', d >= 3 ? 6 : 0);
-  ADDW('m', d >= 4 ? 5 : 0);
-  ADDW('G', d >= 4 ? 5 : 0);
-  ADDW('v', d >= 5 ? 5 : 0);
-  ADDW('w', d >= 5 ? 4 : 0);
-#undef ADDW
-  int totalw = 0;
-  for (int i = 0; i < pn; i++) totalw += pool[i].w;
-  int nm = 6 + depth;
-  if (nm > 24) nm = 24;
-  int placed = 0, guard = 0;
-  while (placed < nm && guard < 600) {
-    guard++;
-    int ri = ab_rng_range(&rng, 1, nr - 1);
-    int tx = rooms[ri].x + ab_rng_range(&rng, 0, rooms[ri].w - 1);
-    int ty = rooms[ri].y + ab_rng_range(&rng, 0, rooms[ri].h - 1);
-    if (m->tiles[ty][tx] != T_FLOOR) continue;
-    if (abs(tx - m->spawn_x) + abs(ty - m->spawn_y) < 6) continue;
-    if (tx == m->stairs_x && ty == m->stairs_y) continue;
-    /* scegli tipo */
-    char tk = 'g';
-    if (totalw > 0) {
-      int roll = ab_rng_range(&rng, 1, totalw);
-      for (int i = 0; i < pn; i++) { roll -= pool[i].w; if (roll <= 0) { tk = pool[i].k; break; } }
-    }
-    char ks[2] = {tk, 0};
-    const AbMonDef *td = ab_mon_def(ks);
-    if (!td) continue;
-    for (int i = 0; i < MAX_MONSTERS; i++) {
-      if (G.mons[i].active) continue;
-      AbMonster *mm = &G.mons[i];
-      mm->active = true;
-      mm->type = tk;
-      mm->x = mm->rx = tx + 0.5; mm->y = mm->ry = ty + 0.5;
-      mm->max_hp = mm->hp = ab_scaled_stat(td->hp, depth, 0.16);
-      mm->dmg = ab_scaled_stat(td->dmg, depth, 0.11);
-      mm->speed = td->speed;
-      mm->aggro = td->aggro;
-      mm->facing_x = 0; mm->facing_y = 1;
-      mm->atk_cd = 0; mm->wander_t = 0;
-      mm->dot_t = 0; mm->regen_acc = 0;
-      mm->is_boss = false;
-      mm->boss_t = 0; mm->spec_cd = ab_rng_frange(&rng, 2, 4); mm->boss_phase = 0;
-      double af = ab_rng_next(&rng);
-      mm->affix = 0;
-      if (!td->boss && depth >= 3 && af < 0.14) mm->affix = 1 + ab_rng_range(&rng, 0, 2);
-      if (mm->affix == 1) mm->speed *= 1.6;
-      placed++;
-      break;
+    for (int x = 0; x < m->w; x++) m->visible[y][x] = 0;
+  int tx = (int)floor(G.p.x), ty = (int)floor(G.p.y);
+  int R = 8;
+  for (int yy = ty - R; yy <= ty + R; yy++) {
+    for (int xx = tx - R; xx <= tx + R; xx++) {
+      if (xx < 0 || yy < 0 || xx >= m->w || yy >= m->h) continue;
+      double ddx = xx - tx, ddy = yy - ty;
+      if (ddx * ddx + ddy * ddy > FOV_RADIUS * FOV_RADIUS) continue;
+      cast_ray(m, tx, ty, xx, yy);
     }
   }
-  /* boss */
-  G.boss_active = false;
-  if (m->has_arena) {
-    char bk = ab_boss_for_depth(depth);
-    char ks[2] = {bk, 0};
-    const AbMonDef *td = ab_mon_def(ks);
-    if (td) {
-      for (int i = 0; i < MAX_MONSTERS; i++) {
-        if (G.mons[i].active) continue;
-        AbMonster *mm = &G.mons[i];
-        mm->active = true;
-        mm->type = bk;
-        mm->x = mm->rx = m->arena_cx + 0.5;
-        mm->y = mm->ry = m->arena_cy + 0.5;
-        mm->max_hp = mm->hp = ab_scaled_stat(td->hp, depth, 0.10);
-        mm->dmg = ab_scaled_stat(td->dmg, depth, 0.08);
-        mm->speed = td->speed;
-        mm->aggro = 99;
-        mm->is_boss = true;
-        mm->affix = 0;
-        mm->boss_t = 0; mm->spec_cd = 2.5; mm->boss_phase = 0;
-        strncpy(G.boss_name, td->name, sizeof G.boss_name - 1);
-        G.boss_hp = mm->hp; G.boss_max = mm->max_hp;
-        break;
-      }
+  for (int y = 0; y < m->h; y++)
+    for (int x = 0; x < m->w; x++)
+      if (m->visible[y][x]) m->visited[y][x] = 1;
+}
+
+/* ---------------- equip ---------------- */
+static int rarity_roll(AbRng *r, int depth) {
+  /* pesi: comune 100, raro 32, epico 9, leggendario 2; alte crescono */
+  double w[4] = {100.0, 32.0 * (1 + depth * 0.045), 9.0 * (1 + depth * 0.045), 2.0 * (1 + depth * 0.045)};
+  double tot = w[0] + w[1] + w[2] + w[3];
+  double roll = ab_rng_next(r) * tot;
+  for (int i = 0; i < 4; i++) { roll -= w[i]; if (roll <= 0) return i; }
+  return 0;
+}
+static int stat_calc(int key, int depth) {
+  /* 0 hp,1 dmgPct,2 speedPct,3 armorPct */
+  if (key == 0) return 4 + (depth * 16) / 10;
+  if (key == 1) return 5 + (depth * 11) / 10;
+  if (key == 2) return 3 + (depth * 5) / 10;
+  return 4 + (depth * 9) / 10;
+}
+static void make_equip(AbRng *r, int depth, int slot, int rarity, AbEquip *e) {
+  static const double mult[4] = {1.0, 1.35, 1.6, 2.2};
+  static const int scount[4] = {1, 1, 2, 3};
+  e->filled = true;
+  e->rarity = rarity;
+  e->hp = e->dmg_pct = e->spd_pct = e->arm_pct = 0;
+  int pool[4] = {0, 1, 2, 3}, pn = 4;
+  for (int i = 0; i < scount[rarity] && pn > 0; i++) {
+    int idx = (int)(ab_rng_next(r) * pn);
+    int key = pool[idx];
+    pool[idx] = pool[--pn];
+    int v = (int)(stat_calc(key, depth) * mult[rarity] + 0.5);
+    if (key == 0) e->hp = v;
+    else if (key == 1) e->dmg_pct = v;
+    else if (key == 2) e->spd_pct = v;
+    else e->arm_pct = v;
+  }
+  snprintf(e->name, sizeof e->name, "%s %s", ab_rarity_name(rarity), EQUIP_SLOT_NAMES[slot]);
+}
+static int equip_power(AbEquip *e) {
+  if (!e->filled) return -1;
+  return e->hp + e->dmg_pct + e->spd_pct + e->arm_pct;
+}
+void ab_equip_bonus(int *hp, int *dmg_pct, int *spd_pct, int *arm_pct) {
+  *hp = *dmg_pct = *spd_pct = *arm_pct = 0;
+  for (int i = 0; i < 5; i++) {
+    if (!G.p.equip[i].filled) continue;
+    *hp += G.p.equip[i].hp;
+    *dmg_pct += G.p.equip[i].dmg_pct;
+    *spd_pct += G.p.equip[i].spd_pct;
+    *arm_pct += G.p.equip[i].arm_pct;
+  }
+}
+static void equip_or_keep(int slot, int rarity, int hp, int dp, int sp, int ap) {
+  AbEquip cur = G.p.equip[slot];
+  AbEquip nw;
+  nw.filled = true; nw.rarity = rarity;
+  nw.hp = hp; nw.dmg_pct = dp; nw.spd_pct = sp; nw.arm_pct = ap;
+  snprintf(nw.name, sizeof nw.name, "%s %s", ab_rarity_name(rarity), EQUIP_SLOT_NAMES[slot]);
+  if (!cur.filled || equip_power(&nw) >= equip_power(&cur)) {
+    int ohp, odp, osp, oap;
+    ab_equip_bonus(&ohp, &odp, &osp, &oap);
+    G.p.equip[slot] = nw;
+    int nhp, ndp, nsp, nap;
+    ab_equip_bonus(&nhp, &ndp, &nsp, &nap);
+    int dh = nhp - ohp;
+    G.p.max_hp += dh;
+    if (dh > 0) G.p.hp += dh;
+    if (G.p.hp > G.p.max_hp) G.p.hp = G.p.max_hp;
+    double cr, cg, cb;
+    ab_rarity_color(rarity, &cr, &cg, &cb);
+    char b[64];
+    snprintf(b, sizeof b, "+%s %s", EQUIP_SLOT_NAMES[slot], ab_rarity_name(rarity));
+    ab_float_text(G.p.x, G.p.y - 0.7, b, cr, cg, cb);
+    char l[96];
+    snprintf(l, sizeof l, "Equipaggiato: %s.", nw.name);
+    ab_add_log(l);
+    if (rarity >= R_EPICO) {
+      char t[64];
+      snprintf(t, sizeof t, "%s - %s", ab_rarity_name(rarity), EQUIP_SLOT_NAMES[slot]);
+      for (size_t i = 0; t[i]; i++) if (t[i] >= 'a' && t[i] <= 'z') t[i] -= 32;
+      ab_loot_banner(t, cr, cg, cb);
+      ab_burst(G.p.x, G.p.y, 12, cr, cg, cb, 4);
     }
-  }
-  G.boss_active = false;
-  G.arena_locked = false;
-}
-
-/* ---------------- combattimento ---------------- */
-static int roll_dmg(int cls) {
-  const AbClassDef *c = ab_class_def(cls);
-  AbRng r;
-  ab_rng_seed(&r, (uint32_t)(G.time * 977) + (uint32_t)(G.p.x * 57) + (uint32_t)(G.p.y * 131) + (uint32_t)rand());
-  int base = c->dmg_min + (int)(ab_rng_next(&r) * (double)(c->dmg_max - c->dmg_min + 1));
-  int eqd = 0;
-  for (int i = 0; i < 5; i++) eqd += G.p.equip[i].dmg;
-  base += eqd;
-  if (G.p.buff_rage_t > 0) base = (int)(base * 1.4 + 0.5);
-  /* crit */
-  double cr = c->crit;
-  if (ab_rng_next(&r) < cr) base = (int)(base * 1.8 + 0.5);
-  return base < 1 ? 1 : base;
-}
-
-static AbMonster *nearest_mon(double range) {
-  AbMonster *best = NULL;
-  double bd = range;
-  for (int i = 0; i < MAX_MONSTERS; i++) {
-    if (!G.mons[i].active) continue;
-    double dd = ab_dist(G.p.x, G.p.y, G.mons[i].x, G.mons[i].y);
-    if (dd < bd) { bd = dd; best = &G.mons[i]; }
-  }
-  return best;
-}
-
-static void spawn_proj(double x, double y, double dx, double dy, double spd, double range, int dmg, bool friendly, double r, double g, double b) {
-  for (int i = 0; i < MAX_PROJS; i++) {
-    if (G.projs[i].active) continue;
-    AbProj *p = &G.projs[i];
-    p->active = true;
-    p->x = x; p->y = y;
-    double l = sqrt(dx*dx + dy*dy);
-    if (l < 0.001) { dx = 0; dy = 1; l = 1; }
-    p->vx = dx / l * spd; p->vy = dy / l * spd;
-    p->life = 3.0; p->range_left = range;
-    p->dmg = dmg;
-    p->friendly = friendly;
-    p->r = r; p->g = g; p->b = b;
-    p->size = 0.09;
-    return;
-  }
-}
-
-void ab_player_attack(void) {
-  if (G.p.dead || G.p.downed) return;
-  if (G.p.atk_cd > 0) return;
-  const AbClassDef *c = ab_class_def(G.p.cls);
-  if (c->max_mp > 0 && c->mana_cost > 0 && G.p.mp < c->mana_cost) {
-    ab_float_text(G.p.x, G.p.y - 0.6, "NO MANA", 0.4, 0.6, 1.0);
-    G.p.atk_cd = 0.25;
-    return;
-  }
-  /* auto-mira come nel JS */
-  double ar = c->ranged ? c->range : (c->range + 0.7 > 2.1 ? c->range + 0.7 : 2.1);
-  AbMonster *nm = nearest_mon(ar);
-  if (nm) {
-    double dx = nm->x - G.p.x, dy = nm->y - G.p.y;
-    double l = sqrt(dx*dx + dy*dy);
-    if (l > 0.01) { G.p.fx = dx / l; G.p.fy = dy / l; }
-  }
-  G.p.atk_cd = c->atk_cooldown * (G.p.buff_haste_t > 0 ? 0.7 : 1.0);
-  G.p.anim_t = 0.22;
-  if (c->max_mp > 0 && c->mana_cost) { G.p.mp -= c->mana_cost; if (G.p.mp < 0) G.p.mp = 0; }
-  int dmg = roll_dmg(G.p.cls);
-  /* prof colpo caricato */
-  if (G.p.cls == CLS_PROF && G.p.charge_t > 0.8) { dmg *= 2; G.p.charge_t = 0; ab_burst(G.p.x, G.p.y, 10, 0.5, 1, 1, 4); }
-
-  if (!c->ranged) {
-    /* melee ad arco */
-    for (int i = 0; i < MAX_MONSTERS; i++) {
-      if (!G.mons[i].active) continue;
-      double dx = G.mons[i].x - G.p.x, dy = G.mons[i].y - G.p.y;
-      double dd = sqrt(dx*dx + dy*dy);
-      if (dd > c->range + 0.35) continue;
-      double dot = 0;
-      if (dd > 0.01) dot = (dx * G.p.fx + dy * G.p.fy) / dd;
-      double need = cos(c->arc);
-      if (dot < need && dd > 0.6) continue;
-      G.mons[i].hp -= dmg;
-      G.mons[i].facing_x = -G.p.fx; G.mons[i].facing_y = -G.p.fy;
-      char b[16]; snprintf(b, sizeof b, "%d", dmg);
-      ab_float_text(G.mons[i].x, G.mons[i].y - 0.5, b, 1, 0.85, 0.4);
-      ab_burst(G.mons[i].x, G.mons[i].y, 5, 1, 0.8, 0.3, 3);
-    }
-    ab_burst(G.p.x + G.p.fx * 0.8, G.p.y + G.p.fy * 0.8, 4, 1, 1, 1, 2.5);
   } else {
-    double cr = 0.55, cg = 0.85, cb = 1.0;
-    if (G.p.cls == CLS_NEGROMANTE) { cr = 0.56; cg = 0.88; cb = 0.48; }
-    else if (G.p.cls == CLS_RANGER) { cr = 0.85; cg = 0.9; cb = 0.69; }
-    else if (G.p.cls == CLS_PROF) { cr = 0.49; cg = 0.98; cb = 1.0; }
-    spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, c->proj_speed, c->range, dmg, true, cr, cg, cb);
-    ab_burst(G.p.x + G.p.fx * 0.5, G.p.y + G.p.fy * 0.5, 3, cr, cg, cb, 2);
+    ab_add_log("Gia possiedi di meglio.");
   }
 }
 
-void ab_use_ability(void) {
-  if (G.p.dead || G.p.downed) return;
-  if (G.p.ability_cd > 0) return;
-  const AbClassDef *c = ab_class_def(G.p.cls);
-  if (c->ability_mana > 0 && G.p.mp < c->ability_mana) {
-    ab_float_text(G.p.x, G.p.y - 0.6, "NO MANA", 0.4, 0.6, 1.0);
-    return;
+/* ---------------- mercante ---------------- */
+int ab_merchant_price(int idx) {
+  int d = G.depth;
+  if (idx == 0) return 12 + d * 2;
+  if (idx == 1) return 12 + d * 2;
+  if (idx == 2) return 20 + d * 4;
+  if (idx == 3) return 45 + d * 8;
+  return -1;
+}
+bool ab_merchant_buy(int idx) {
+  int price = ab_merchant_price(idx);
+  if (price < 0) return false;
+  if (G.p.gold < price) { ab_toast("Non hai abbastanza oro"); return false; }
+  G.p.gold -= price;
+  if (idx == 0) { G.p.potions++; ab_add_log("Pozione di salute comprata."); }
+  else if (idx == 1) { G.p.mana_potions++; ab_add_log("Pozione di mana comprata."); }
+  else if (idx == 2) {
+    int b = ab_rng_range(&(AbRng){(uint32_t)(G.time * 1000 + 5)}, 0, BUFF_COUNT - 1);
+    G.p.buffs[b] = BUFF_DURATION[b];
+    char l[96];
+    snprintf(l, sizeof l, "Mercante: %s!", BUFF_NAMES[b]);
+    ab_add_log(l);
+    ab_float_text(G.p.x, G.p.y - 0.7, BUFF_NAMES[b], 0.5, 1, 0.5);
+  } else {
+    AbRng r; ab_rng_seed(&r, (uint32_t)(G.time * 977 + 3));
+    int slot = ab_rng_range(&r, 0, 4);
+    int rar = rarity_roll(&r, G.depth);
+    AbEquip e; make_equip(&r, G.depth, slot, rar, &e);
+    G.p.equip[slot].filled = false; /* forza confronto */
+    equip_or_keep(slot, e.rarity, e.hp, e.dmg_pct, e.spd_pct, e.arm_pct);
   }
-  G.p.ability_cd = c->ability_cd;
-  if (c->ability_mana) { G.p.mp -= c->ability_mana; if (G.p.mp < 0) G.p.mp = 0; }
-  int dmg = roll_dmg(G.p.cls);
-  switch (G.p.cls) {
-    case CLS_GUERRIERO: { /* Carica: scatto + danno linea */
-      double nx = G.p.x + G.p.fx * 3.0, ny = G.p.y + G.p.fy * 3.0;
-      int tx = (int)nx, ty = (int)ny;
-      if (ab_is_walkable(tx, ty)) { G.p.x = nx; G.p.y = ny; }
-      for (int i = 0; i < MAX_MONSTERS; i++) {
-        if (!G.mons[i].active) continue;
-        if (ab_dist(G.p.x, G.p.y, G.mons[i].x, G.mons[i].y) < 2.2) {
-          G.mons[i].hp -= dmg + 2;
-          ab_float_text(G.mons[i].x, G.mons[i].y - 0.5, "CARICA!", 1, 0.8, 0.3);
-        }
-      }
-      ab_burst(G.p.x, G.p.y, 12, 1, 0.8, 0.3, 4);
-      G.shake = 0.25;
-      break;
-    }
-    case CLS_LADRO: { /* Passo furtivo: blink sul nearest + crit */
-      AbMonster *nm = nearest_mon(9);
-      if (nm) {
-        G.p.x = nm->x - G.p.fx * 0.8; G.p.y = nm->y - G.p.fy * 0.8;
-        nm->hp -= (int)(dmg * 1.8 + 0.5);
-        ab_float_text(nm->x, nm->y - 0.5, "FURTIVO!", 0.8, 0.9, 1);
-      }
-      G.p.iframes = 1.2;
-      break;
-    }
-    case CLS_MAGO: case CLS_NEGROMANTE: { /* AoE */
-      int hits = 0;
-      for (int i = 0; i < MAX_MONSTERS; i++) {
-        if (!G.mons[i].active) continue;
-        if (ab_dist(G.p.x, G.p.y, G.mons[i].x, G.mons[i].y) < 2.6) {
-          G.mons[i].hp -= dmg;
-          hits++;
-          if (G.p.cls == CLS_NEGROMANTE) { G.p.hp += dmg / 2; if (G.p.hp > G.p.max_hp) G.p.hp = G.p.max_hp; }
-        }
-      }
-      ab_burst(G.p.x, G.p.y, 20, 0.6, 0.8, 1, 5);
-      G.shake = 0.3;
-      if (hits == 0) ab_float_text(G.p.x, G.p.y - 0.6, "VUOTO", 0.6, 0.6, 0.6);
-      break;
-    }
-    case CLS_RANGER: { /* raffica ventaglio 5 frecce */
-      for (int k = -2; k <= 2; k++) {
-        double a = atan2(G.p.fy, G.p.fx) + k * 0.18;
-        spawn_proj(G.p.x, G.p.y, cos(a), sin(a), 15, 9, dmg, true, 0.85, 0.9, 0.69);
-      }
-      break;
-    }
-    case CLS_PALADINO:
-      G.p.buff_shield_t = 5.0;
-      ab_add_log("Muro Sacro: -50% danno per 5s.");
-      break;
-    case CLS_BARDO:
-      G.p.buff_rage_t = 8.0;
-      ab_add_log("Canto: +40% danno per 8s.");
-      break;
-    case CLS_MONACO: { /* onda perforante */
-      for (int k = 0; k < 3; k++)
-        spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, 9 + k * 2, 7, dmg, true, 1, 0.8, 0.5);
-      break;
-    }
-    case CLS_PROF:
-      G.p.charge_t = 0.0001; /* inizia carica */
-      ab_add_log("Carica plasma... attacca per sparare!");
-      G.p.ability_cd = 4.0;
-      break;
-  }
+  ab_burst(G.p.x, G.p.y, 8, 1, 0.85, 0.3, 3);
+  return true;
 }
 
+/* ---------------- pozioni / interact ---------------- */
 void ab_drink_potion(void) {
-  if (G.p.dead) return;
-  if (G.p.potions <= 0) { ab_float_text(G.p.x, G.p.y - 0.6, "VUOTA", 1, 0.4, 0.4); return; }
-  if (G.p.hp >= G.p.max_hp && !G.p.downed) return;
+  if (G.p.dead || G.p.downed) return;
+  if (G.p.potions <= 0) return;
+  if (G.p.hp >= G.p.max_hp) { ab_toast("Sei gia in piena salute"); return; }
   G.p.potions--;
-  int heal = G.p.max_hp / 2 + 4;
+  int heal = (int)(G.p.max_hp * 0.55 + 0.5) + 2;
   G.p.hp += heal;
   if (G.p.hp > G.p.max_hp) G.p.hp = G.p.max_hp;
-  if (G.p.downed) { G.p.downed = false; G.p.downed_t = 0; ab_toast("Rianimato!"); }
   ab_burst(G.p.x, G.p.y, 10, 0.5, 1, 0.5, 3);
-  char b[32]; snprintf(b, sizeof b, "+%d HP", heal);
-  ab_float_text(G.p.x, G.p.y - 0.6, b, 0.5, 1, 0.5);
+  char b[32]; snprintf(b, sizeof b, "+%d", heal);
+  ab_float_text(G.p.x, G.p.y - 0.7, b, 0.5, 1, 0.5);
 }
 void ab_drink_mana(void) {
-  if (G.p.dead || G.p.max_mp <= 0) return;
+  if (G.p.dead || G.p.downed) return;
+  const AbClassDef *c = ab_class_def(G.p.cls);
+  if (c->max_mp <= 0) { ab_toast("La tua classe non usa mana"); return; }
   if (G.p.mana_potions <= 0) return;
-  if (G.p.mp >= G.p.max_mp) return;
+  if (G.p.mp >= G.p.max_mp) { ab_toast("Mana gia pieno"); return; }
   G.p.mana_potions--;
-  G.p.mp = G.p.max_mp;
-  ab_float_text(G.p.x, G.p.y - 0.6, "+MANA", 0.4, 0.7, 1);
+  int restore = (int)(G.p.max_mp * 0.6 + 0.5) + 1;
+  G.p.mp += restore;
+  if (G.p.mp > G.p.max_mp) G.p.mp = G.p.max_mp;
+  ab_float_text(G.p.x, G.p.y - 0.7, "MANA", 0.4, 0.7, 1);
 }
 
 void ab_try_interact(void) {
   if (G.p.dead || G.p.downed) return;
   int px = (int)floor(G.p.x), py = (int)floor(G.p.y);
-  /* scale */
-  if (abs(px - G.map.stairs_x) + abs(py - G.map.stairs_y) <= 1) { ab_descend(); return; }
-  /* mercante */
-  if (abs(px - G.map.merch_x) + abs(py - G.map.merch_y) <= 2) {
-    G.merchant_open = !G.merchant_open;
+  if (px >= 0 && py >= 0 && px < G.map.w && py < G.map.h &&
+      G.map.tiles[py][px] == T_STAIRS) { ab_descend(); return; }
+  double mdx = G.p.x - (G.map.merch_x + 0.5), mdy = G.p.y - (G.map.merch_y + 0.5);
+  if (mdx * mdx + mdy * mdy < 2.1 * 2.1) {
+    if (!G.merchant_open) G.merchant_open = true;
     return;
   }
-  /* forzieri */
   for (int i = 0; i < G.chest_count; i++) {
     AbChest *c = &G.chests[i];
     if (!c->active || c->open) continue;
-    if (abs(px - c->tx) + abs(py - c->ty) <= 1) {
-      c->open = true;
-      ab_burst(c->tx + 0.5, c->ty + 0.5, 12, 1, 0.85, 0.3, 3.5);
-      if (c->kind == 0) {
-        G.p.gold += c->gold;
-        char b[48]; snprintf(b, sizeof b, "+%d ORO", c->gold);
-        ab_loot_banner(b, c->rarity);
-        ab_add_log(b);
-      } else if (c->kind == 1) { G.p.potions++; ab_loot_banner("Pozione HP!", c->rarity); }
-      else if (c->kind == 2) { G.p.mana_potions++; ab_loot_banner("Pozione Mana!", c->rarity); }
-      else {
-        /* equip random */
-        static const char *slots[5] = {"Elmo","Collana","Armatura","Anello","Gambali"};
-        int s = rand() % 5;
-        AbEquip *e = &G.p.equip[s];
-        e->filled = true;
-        int mult = c->rarity + 1;
-        e->rarity = c->rarity;
-        e->hp = mult * (2 + rand() % 4);
-        e->dmg = mult * (1 + rand() % 2);
-        e->speed = (c->rarity >= 2) ? 0.2 : 0;
-        snprintf(e->name, sizeof e->name, "%s %s", c->rarity == 3 ? "Leggendario" : c->rarity == 2 ? "Epico" : c->rarity == 1 ? "Raro" : "Comune", slots[s]);
-        /* applica */
-        const AbClassDef *cd = ab_class_def(G.p.cls);
-        int eqh = 0; double eqs = 0;
-        for (int k = 0; k < 5; k++) { eqh += G.p.equip[k].hp; eqs += G.p.equip[k].speed; }
-        int oldmax = G.p.max_hp;
-        G.p.max_hp = cd->hp + eqh;
-        G.p.hp += (G.p.max_hp - oldmax);
-        G.p.speed = cd->speed + eqs;
-        ab_loot_banner(e->name, c->rarity);
+    double dx = G.p.x - (c->tx + 0.5), dy = G.p.y - (c->ty + 0.5);
+    if (dx * dx + dy * dy > 2.1 * 2.1) continue;
+    if (c->boss_chest && !G.boss_dead) { ab_toast("Sigillato: uccidi il boss!"); return; }
+    c->open = true;
+    ab_burst(c->tx + 0.5, c->ty + 0.5, 12, 1, 0.85, 0.3, 3.5);
+    AbRng r; ab_rng_seed(&r, (uint32_t)(G.time * 131 + i * 17 + G.depth));
+    if (c->boss_chest) {
+      int gold = 60 + ab_rng_range(&r, 0, 25 * G.depth - 1 > 0 ? 25 * G.depth - 1 : 0);
+      G.p.gold += gold;
+      G.p.potions++; G.p.mana_potions++;
+      int rar = ab_rng_next(&r) < 0.45 ? R_LEGGENDARIO : R_EPICO;
+      int slot = ab_rng_range(&r, 0, 4);
+      AbEquip e; make_equip(&r, G.depth, slot, rar, &e);
+      char b[48]; snprintf(b, sizeof b, "+%d ORO (tana)", gold);
+      ab_add_log(b);
+      equip_or_keep(slot, e.rarity, e.hp, e.dmg_pct, e.spd_pct, e.arm_pct);
+    } else {
+      int gold = 6 + ab_rng_range(&r, 0, 9 * G.depth - 1 > 0 ? 9 * G.depth - 1 : 0);
+      G.p.gold += gold;
+      char b[48]; snprintf(b, sizeof b, "+%d ORO", gold);
+      ab_float_text(c->tx + 0.5, c->ty, b, 1, 0.85, 0.3);
+      if (ab_rng_next(&r) < 0.32) { G.p.potions++; ab_add_log("Pozione trovata."); }
+      if (ab_rng_next(&r) < 0.24) { G.p.mana_potions++; ab_add_log("Pozione di mana trovata."); }
+      if (ab_rng_next(&r) < 0.2) {
+        int slot = ab_rng_range(&r, 0, 4);
+        int rar = rarity_roll(&r, G.depth);
+        AbEquip e; make_equip(&r, G.depth, slot, rar, &e);
+        equip_or_keep(slot, e.rarity, e.hp, e.dmg_pct, e.spd_pct, e.arm_pct);
       }
-      return;
     }
+    return;
   }
-}
-
-/* acquisti mercante: 0 poz HP 10, 1 poz mana 8, 2 +danno 30, 3 +vita 30, 4 gamble 50 */
-bool ab_merchant_buy(int idx);
-bool ab_merchant_buy(int idx) {
-  int price[5] = {10, 8, 30, 30, 50};
-  if (idx < 0 || idx > 4) return false;
-  if (G.p.gold < price[idx]) { ab_float_text(G.p.x, G.p.y - 0.6, "POCHI SOLDI", 1, 0.8, 0.3); return false; }
-  if (idx == 0) { G.p.gold -= price[idx]; G.p.potions++; }
-  else if (idx == 1) { G.p.gold -= price[idx]; G.p.mana_potions++; }
-  else if (idx == 2) {
-    G.p.gold -= price[idx];
-    G.p.equip[3].filled = true; G.p.equip[3].dmg += 1;
-    snprintf(G.p.equip[3].name, sizeof G.p.equip[3].name, "Anello Potente");
-    if (G.p.equip[3].rarity < 1) G.p.equip[3].rarity = 1;
-  } else if (idx == 3) {
-    G.p.gold -= price[idx];
-    G.p.max_hp += 3; G.p.hp += 3;
-  } else {
-    G.p.gold -= price[idx];
-    int s = rand() % 5;
-    AbEquip *e = &G.p.equip[s];
-    e->filled = true;
-    int r = rand() % 100;
-    e->rarity = r < 55 ? 0 : r < 80 ? 1 : r < 94 ? 2 : 3;
-    e->hp = (e->rarity + 1) * (2 + rand() % 4);
-    e->dmg = (e->rarity + 1);
-    snprintf(e->name, sizeof e->name, "Bottino %d", s);
-    const AbClassDef *cd = ab_class_def(G.p.cls);
-    int eqh = 0;
-    for (int k = 0; k < 5; k++) eqh += G.p.equip[k].hp;
-    G.p.max_hp = cd->hp + eqh;
-  }
-  ab_burst(G.p.x, G.p.y, 8, 1, 0.85, 0.3, 3);
-  return true;
 }
 
 void ab_descend(void) {
@@ -800,72 +919,114 @@ void ab_descend(void) {
   }
 }
 
-/* danno al giocatore (con scudo/iframe/god) */
-static void hurt_player(int dmg) {
-  if (G.p.dead || G.god) return;
-  if (G.p.iframes > 0) return;
-  if (G.p.buff_shield_t > 0) dmg = (dmg + 1) / 2;
-  G.p.hp -= dmg;
-  G.p.iframes = 0.5;
-  G.shake = 0.3;
-  char b[16]; snprintf(b, sizeof b, "-%d", dmg);
-  ab_float_text(G.p.x, G.p.y - 0.6, b, 1, 0.3, 0.3);
-  ab_burst(G.p.x, G.p.y, 6, 1, 0.2, 0.2, 3);
-  if (G.p.hp <= 0) {
-    if (!G.p.downed) {
-      G.p.downed = true; G.p.downed_t = 10.0; G.p.hp = 0;
-      ab_toast("A TERRA! Un compagno ti rianimi... (Q per pozione)");
-      ab_add_log("Sei a terra! Bevi una pozione (Q) entro 10s.");
-    } else {
-      G.p.dead = true;
-      G.state = ST_DEAD;
-      ab_add_log("Sei morto. L'abisso ti ha reclamato.");
-      /* permadeath: perdi oro/poz/equip */
-      G.p.gold = 0; G.p.potions = 0; G.p.mana_potions = 0;
-      memset(G.p.equip, 0, sizeof G.p.equip);
-      if (G.depth > G.best_depth) G.best_depth = G.depth;
-      if (G.p.gold > G.best_gold) G.best_gold = G.p.gold;
-      ab_save_record();
-    }
+/* ---------------- combattimento ---------------- */
+static double roll_amount(int cls, bool *crit) {
+  const AbClassDef *c = ab_class_def(cls);
+  AbRng r;
+  ab_rng_seed(&r, (uint32_t)(G.time * 977) + (uint32_t)(G.p.x * 57) + (uint32_t)(G.p.y * 131) + (uint32_t)rand());
+  double dmg = c->dmg_min + ab_rng_next(&r) * (c->dmg_max - c->dmg_min);
+  *crit = false;
+  if (c->crit > 0 && ab_rng_next(&r) < c->crit) { dmg *= 1.7; *crit = true; }
+  int hp, dp, sp, ap;
+  ab_equip_bonus(&hp, &dp, &sp, &ap);
+  dmg *= (1 + dp / 100.0);
+  return dmg;
+}
+
+static AbMonster *nearest_mon(double range, bool use_rx) {
+  AbMonster *best = NULL;
+  double bd = range * range;
+  for (int i = 0; i < MAX_MONSTERS; i++) {
+    if (!G.mons[i].active) continue;
+    double mx = use_rx ? G.mons[i].rx : G.mons[i].x;
+    double my = use_rx ? G.mons[i].ry : G.mons[i].y;
+    double dx = mx - G.p.x, dy = my - G.p.y;
+    double d2 = dx * dx + dy * dy;
+    if (d2 < range * range && d2 < bd) { bd = d2; best = &G.mons[i]; }
+  }
+  return best;
+}
+
+static void spawn_proj(double x, double y, double dx, double dy, double spd, double range, int dmg, bool friendly, double r, double g, double b, double hit_r, bool poison, bool web) {
+  for (int i = 0; i < MAX_PROJS; i++) {
+    if (G.projs[i].active) continue;
+    AbProj *p = &G.projs[i];
+    p->active = true;
+    p->x = x; p->y = y;
+    double l = sqrt(dx*dx + dy*dy);
+    if (l < 0.001) { dx = 0; dy = 1; l = 1; }
+    p->vx = dx / l * spd; p->vy = dy / l * spd;
+    p->life = 4.0; p->range_left = range;
+    p->dmg = dmg;
+    p->friendly = friendly;
+    p->poison = poison; p->web = web;
+    p->hit_r = hit_r > 0 ? hit_r : 0.45;
+    p->r = r; p->g = g; p->b = b;
+    p->size = 0.09;
+    return;
   }
 }
 
-/* uccisione mostro: oro/xp/split/esplosivo */
+static void hurt_player(int dmg, bool poison) {
+  if (G.god) return;
+  if (G.p.dead || G.p.iframes > 0) return;
+  G.p.iframes = 0.45;
+  if (G.p.downed) {
+    G.p.dead = true;
+    G.state = ST_DEAD;
+    ab_add_log("Colpito a terra: morte.");
+    G.p.gold = 0; G.p.potions = 0; G.p.mana_potions = 0;
+    memset(G.p.equip, 0, sizeof G.p.equip);
+    if (G.depth > G.best_depth) G.best_depth = G.depth;
+    ab_save_record();
+    return;
+  }
+  double fa = G.p.buffs[BUFF_SHIELD] > 0 ? dmg * 0.5 : dmg;
+  int hp, dp, sp, ap;
+  ab_equip_bonus(&hp, &dp, &sp, &ap);
+  double m = 1 - ap / 100.0;
+  if (m < 0.2) m = 0.2;
+  fa *= m;
+  int fin = (int)(fa + 0.5);
+  if (fin < 1) fin = 1;
+  G.p.hp -= fin;
+  if (G.p.hp < 0) G.p.hp = 0;
+  G.shake = 0.3;
+  char b[16]; snprintf(b, sizeof b, "-%d", fin);
+  ab_float_text(G.p.x, G.p.y - 0.6, b, 1, 0.3, 0.3);
+  ab_burst(G.p.x, G.p.y, 6, 1, 0.2, 0.2, 3);
+  if (poison) G.p.poison_t = 3;
+  if (G.p.hp <= 0) {
+    G.p.downed = true; G.p.downed_t = DOWNED_BLEEDOUT; G.p.hp = 0;
+    ab_toast("A TERRA! Nessuno puo rianimarti...");
+    ab_add_log("Sei a terra! Senza compagni, l'abisso ti reclama.");
+  }
+}
+
 static void kill_monster(int i) {
   AbMonster *m = &G.mons[i];
-  char ks[2] = {m->type, 0};
-  const AbMonDef *td = ab_mon_def(ks);
+  const AbMonDef *td = ab_mon_def(m->type);
   AbRng r;
   ab_rng_seed(&r, (uint32_t)(G.time * 131) + (uint32_t)i * 17 + 3);
-  int gold = td ? td->gold_min + (int)(ab_rng_next(&r) * (double)(td->gold_max - td->gold_min + 1)) : 2;
+  int gold = td ? td->gold_min + ab_rng_range(&r, 0, td->gold_max - td->gold_min) : 2;
   G.p.gold += gold;
-  G.p.xp += td ? td->xp : 2;
-  /* level up semplice */
-  int need = 10 + G.p.level * 8;
-  if (G.p.xp >= need) {
-    G.p.xp -= need; G.p.level++;
-    G.p.max_hp += 2; G.p.hp = G.p.max_hp;
-    ab_toast("LIVELLO SU!");
-    ab_add_log("Sali di livello: +2 HP max.");
-  }
+  char b[24]; snprintf(b, sizeof b, "+%d", gold);
+  ab_float_text(m->x, m->y - 0.5, b, 1, 0.85, 0.3);
   ab_burst(m->x, m->y, m->is_boss ? 30 : 10, 1, 0.5, 0.2, 4);
   if (m->affix == 2) {
-    /* esplosivo */
     for (int k = 0; k < MAX_MONSTERS; k++) {
       if (k != i && G.mons[k].active && ab_dist(m->x, m->y, G.mons[k].x, G.mons[k].y) < 1.8)
         G.mons[k].hp -= 6;
     }
-    if (ab_dist(m->x, m->y, G.p.x, G.p.y) < 1.8) hurt_player(5);
+    if (ab_dist(m->x, m->y, G.p.x, G.p.y) < 1.8) hurt_player(5, false);
     ab_burst(m->x, m->y, 16, 1, 0.4, 0.1, 6);
     G.shake = 0.35;
   }
   if (td && td->split) {
-    /* gelatina -> 2 melme */
     for (int k = 0; k < 2; k++) {
       for (int j = 0; j < MAX_MONSTERS; j++) {
         if (G.mons[j].active) continue;
-        char js[2] = {'j', 0};
-        const AbMonDef *jd = ab_mon_def(js);
+        const AbMonDef *jd = ab_mon_def('j');
         G.mons[j].active = true;
         G.mons[j].type = 'j';
         G.mons[j].x = G.mons[j].rx = m->x + (k ? 0.4 : -0.4);
@@ -874,39 +1035,232 @@ static void kill_monster(int i) {
         G.mons[j].dmg = ab_scaled_stat(jd->dmg, G.depth, 0.11);
         G.mons[j].speed = jd->speed; G.mons[j].aggro = jd->aggro;
         G.mons[j].is_boss = false; G.mons[j].affix = 0;
-        G.mons[j].atk_cd = 0;
+        G.mons[j].atk_cd = 0; G.mons[j].fx_mode = 0; G.mons[j].dent_t = 0;
         break;
       }
     }
   }
   if (m->is_boss) {
-    ab_toast("BOSS SCONFITTO!");
-    ab_add_log("Il boss cade. Bottino leggendario!");
-    G.p.gold += 40 + G.depth * 3;
-    G.p.potions += 2;
+    G.boss_dead = true;
     G.boss_active = false;
+    G.map.gates_closed = false;
+    ab_toast("BOSS SCONFITTO!");
+    ab_add_log("Il boss cade. La tana si apre.");
     ab_burst(m->x, m->y, 40, 1, 0.9, 0.4, 6);
     G.shake = 0.5;
+    if (G.depth > G.best_depth) { G.best_depth = G.depth; ab_save_record(); }
   }
   m->active = false;
 }
 
+void ab_player_attack(void) {
+  if (G.p.dead || G.p.downed) return;
+  if (G.p.atk_cd > 0) return;
+  const AbClassDef *c = ab_class_def(G.p.cls);
+  if (c->max_mp > 0 && c->mana_cost > 0 && G.p.mp < c->mana_cost) {
+    ab_toast("Mana insufficiente");
+    return;
+  }
+  G.p.atk_cd = c->atk_cooldown * (G.p.buffs[BUFF_FOCUS] > 0 ? 0.5 : 1.0);
+  G.p.anim_t = 0.22;
+  if (c->max_mp > 0 && c->mana_cost) { G.p.mp -= c->mana_cost; if (G.p.mp < 0) G.p.mp = 0; }
+  double ar = c->ranged ? c->range : (c->range + 0.7 > 2.1 ? c->range + 0.7 : 2.1);
+  AbMonster *nm = nearest_mon(ar, true);
+  if (nm) {
+    double dx = nm->rx - G.p.x, dy = nm->ry - G.p.y;
+    double l = sqrt(dx*dx + dy*dy);
+    if (l > 0.01) { G.p.fx = dx / l; G.p.fy = dy / l; }
+  }
+  double rage = G.p.buffs[BUFF_RAGE] > 0 ? 1.4 : 1.0;
+  int dmg = 0;
+  if (G.p.cls == CLS_PROF && G.p.charge_t >= 0.8) {
+    bool cr; dmg = (int)(roll_amount(CLS_PROF, &cr) * 2 * rage + 0.5);
+    G.p.charge_t = 0;
+    ab_burst(G.p.x, G.p.y, 10, 0.5, 1, 1, 4);
+  }
+  if (!c->ranged) {
+    for (int i = 0; i < MAX_MONSTERS; i++) {
+      if (!G.mons[i].active) continue;
+      double dx = G.mons[i].rx - G.p.x, dy = G.mons[i].ry - G.p.y;
+      double dd = sqrt(dx*dx + dy*dy);
+      if (dd > c->range) continue;
+      double dot = 0;
+      if (dd > 0.01) dot = (dx * G.p.fx + dy * G.p.fy) / dd;
+      if (dot < cos(c->arc)) continue;
+      bool cr = false;
+      int amount = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5);
+      G.mons[i].hp -= amount;
+      G.mons[i].facing_x = -G.p.fx; G.mons[i].facing_y = -G.p.fy;
+      char b[16]; snprintf(b, sizeof b, cr ? "%d!" : "%d", amount);
+      ab_float_text(G.mons[i].rx, G.mons[i].ry - 0.5, b, cr ? 1 : 0.95, cr ? 0.81 : 0.95, cr ? 0.36 : 0.95);
+      ab_burst(G.mons[i].rx, G.mons[i].ry, 5, 1, 0.8, 0.3, 3);
+    }
+    ab_burst(G.p.x + G.p.fx * 0.8, G.p.y + G.p.fy * 0.8, 4, 1, 1, 1, 2.5);
+  } else {
+    if (!dmg) { bool cr; dmg = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5); }
+    double cr = 0.55, cg = 0.85, cb = 1.0;
+    if (G.p.cls == CLS_NEGROMANTE) { cr = 0.56; cg = 0.88; cb = 0.48; }
+    else if (G.p.cls == CLS_RANGER) { cr = 0.85; cg = 0.9; cb = 0.69; }
+    else if (G.p.cls == CLS_PROF) { cr = 0.49; cg = 0.98; cb = 1.0; }
+    spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, c->proj_speed, c->range, dmg, true, cr, cg, cb, 0.45, false, false);
+    ab_burst(G.p.x + G.p.fx * 0.5, G.p.y + G.p.fy * 0.5, 3, cr, cg, cb, 2);
+  }
+}
+
+void ab_use_ability(void) {
+  if (G.p.dead || G.p.downed) return;
+  if (G.p.ability_cd > 0) return;
+  const AbClassDef *c = ab_class_def(G.p.cls);
+  if (c->ability_mana > 0 && G.p.mp < c->ability_mana) {
+    ab_float_text(G.p.x, G.p.y - 0.6, "NO MANA", 0.4, 0.6, 1.0);
+    return;
+  }
+  G.p.ability_cd = c->ability_cd;
+  if (c->ability_mana) { G.p.mp -= c->ability_mana; if (G.p.mp < 0) G.p.mp = 0; }
+  bool cr = false;
+  double rage = G.p.buffs[BUFF_RAGE] > 0 ? 1.4 : 1.0;
+  int dmg = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5);
+  switch (G.p.cls) {
+    case CLS_GUERRIERO: {
+      double nx = G.p.x + G.p.fx * 3.0, ny = G.p.y + G.p.fy * 3.0;
+      if (ab_is_walkable((int)nx, (int)ny)) { G.p.x = nx; G.p.y = ny; }
+      for (int i = 0; i < MAX_MONSTERS; i++) {
+        if (!G.mons[i].active) continue;
+        if (ab_dist(G.p.x, G.p.y, G.mons[i].x, G.mons[i].y) < 2.2) {
+          G.mons[i].hp -= dmg + 2;
+          ab_float_text(G.mons[i].x, G.mons[i].y - 0.5, "CARICA!", 1, 0.8, 0.3);
+        }
+      }
+      ab_burst(G.p.x, G.p.y, 12, 1, 0.8, 0.3, 4);
+      G.shake = 0.25;
+      break;
+    }
+    case CLS_LADRO: {
+      AbMonster *nmm = nearest_mon(9, true);
+      if (nmm) {
+        G.p.x = nmm->x - G.p.fx * 0.8; G.p.y = nmm->y - G.p.fy * 0.8;
+        nmm->hp -= (int)(dmg * 1.8 + 0.5);
+        ab_float_text(nmm->x, nmm->y - 0.5, "FURTIVO!", 0.8, 0.9, 1);
+      }
+      G.p.iframes = 1.2;
+      break;
+    }
+    case CLS_MAGO: case CLS_NEGROMANTE: {
+      int hits = 0;
+      for (int i = 0; i < MAX_MONSTERS; i++) {
+        if (!G.mons[i].active) continue;
+        if (ab_dist(G.p.x, G.p.y, G.mons[i].x, G.mons[i].y) < 2.6) {
+          G.mons[i].hp -= dmg;
+          hits++;
+          if (G.p.cls == CLS_NEGROMANTE) { G.p.hp += dmg / 2; if (G.p.hp > G.p.max_hp) G.p.hp = G.p.max_hp; }
+        }
+      }
+      ab_burst(G.p.x, G.p.y, 20, 0.6, 0.8, 1, 5);
+      G.shake = 0.3;
+      if (hits == 0) ab_float_text(G.p.x, G.p.y - 0.6, "VUOTO", 0.6, 0.6, 0.6);
+      break;
+    }
+    case CLS_RANGER: {
+      for (int k = -2; k <= 2; k++) {
+        double a = atan2(G.p.fy, G.p.fx) + k * 0.18;
+        spawn_proj(G.p.x, G.p.y, cos(a), sin(a), 15, 9, dmg, true, 0.85, 0.9, 0.69, 0.45, false, false);
+      }
+      break;
+    }
+    case CLS_PALADINO:
+      G.p.buffs[BUFF_SHIELD] = 5.0;
+      ab_add_log("Muro Sacro: -50% danno per 5s.");
+      break;
+    case CLS_BARDO:
+      G.p.buffs[BUFF_RAGE] = 8.0;
+      ab_add_log("Canto: +40% danno per 8s.");
+      break;
+    case CLS_MONACO: {
+      for (int k = 0; k < 3; k++)
+        spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, 9 + k * 2, 7, dmg, true, 1, 0.8, 0.5, 0.45, false, false);
+      break;
+    }
+    case CLS_PROF:
+      G.p.charge_t = 0.0001;
+      ab_add_log("Carica plasma... attacca per sparare!");
+      G.p.ability_cd = 4.0;
+      break;
+  }
+}
+
 /* ---------------- update ---------------- */
+static void summon_minions(AbMonster *m) {
+  const AbMonDef *td = ab_mon_def(m->type);
+  if (!td || !td->summon || m->summon_left <= 0) return;
+  int n = td->summon_n;
+  if (n > m->summon_left) n = m->summon_left;
+  char ks[2] = {td->summon, 0};
+  const AbMonDef *jd = ab_mon_def(td->summon);
+  (void)ks;
+  if (!jd) return;
+  for (int k = 0; k < n; k++) {
+    for (int j = 0; j < MAX_MONSTERS; j++) {
+      if (G.mons[j].active) continue;
+      G.mons[j].active = true;
+      G.mons[j].type = td->summon;
+      G.mons[j].x = G.mons[j].rx = m->x + (k % 2 ? 1 : -1);
+      G.mons[j].y = G.mons[j].ry = m->y + (k / 2 ? 1 : -1);
+      G.mons[j].max_hp = G.mons[j].hp = ab_scaled_stat(jd->hp, G.depth, 0.16);
+      G.mons[j].dmg = ab_scaled_stat(jd->dmg, G.depth, 0.11);
+      G.mons[j].speed = jd->speed; G.mons[j].aggro = 99;
+      G.mons[j].is_boss = false; G.mons[j].affix = 0; G.mons[j].atk_cd = 0;
+      G.mons[j].fx_mode = 0; G.mons[j].dent_t = 0;
+      m->summon_left--;
+      break;
+    }
+  }
+  ab_add_log("Il boss evoca servitori!");
+  ab_burst(m->x, m->y, 12, 1, 0.5, 0.2, 4);
+}
+
 void ab_update(double dt, unsigned keys) {
   if (G.state != ST_GAME) return;
   if (dt > 0.05) dt = 0.05;
   G.time += dt;
   G.torch_clk += dt;
-  if (G.shake > 0) G.shake -= dt;
+  if (G.shake > 0) G.shake -= dt * 2.6;
   if (G.toast_t > 0) G.toast_t -= dt;
   if (G.loot_t > 0) G.loot_t -= dt;
   for (int i = 0; i < MAX_LOGLINES; i++) if (G.log_t[i] > 0) G.log_t[i] -= dt;
 
-  double spd = G.p.speed * (G.speed5 ? 5 : 1) * (G.p.buff_haste_t > 0 ? 1.3 : 1.0);
-  /* carica prof */
+  static double respawn_t = 10, power_t = 20;
+
+  int ehp, edp, esp, eap;
+  ab_equip_bonus(&ehp, &edp, &esp, &eap);
+  const AbClassDef *cc = ab_class_def(G.p.cls);
+  double spd = cc->speed * (G.speed5 ? 5 : 1);
+  if (G.p.buffs[BUFF_HASTE] > 0) spd *= 1.4;
+  spd *= (1 + esp / 100.0);
+  if (G.p.web_t > 0) { spd *= 0.5; G.p.web_t -= dt; }
+  G.p.speed = spd;
+
+  for (int i = 0; i < BUFF_COUNT; i++)
+    if (G.p.buffs[i] > 0) G.p.buffs[i] -= dt;
   if (G.p.charge_t > 0 && G.p.charge_t < 0.8) {
     G.p.charge_t += dt;
     if (G.p.charge_t >= 0.8) ab_float_text(G.p.x, G.p.y - 0.6, "CARICO!", 0.5, 1, 1);
+  }
+  if (G.p.poison_t > 0) {
+    G.p.poison_t -= dt;
+    G.p.poison_acc += dt;
+    if (G.p.poison_acc > 1) {
+      G.p.poison_acc -= 1;
+      G.p.hp -= 1;
+      if (G.p.hp < 0) G.p.hp = 0;
+      if (G.p.hp <= 0 && !G.p.dead && !G.p.downed) {
+        G.p.downed = true; G.p.downed_t = DOWNED_BLEEDOUT; G.p.hp = 0;
+        ab_toast("A TERRA!");
+      }
+    }
+  }
+  if (cc->max_mp > 0 && G.p.mp < G.p.max_mp) {
+    G.p.mp += dt * 0.8;
+    if (G.p.mp > G.p.max_mp) G.p.mp = G.p.max_mp;
   }
 
   if (!G.p.dead && !G.p.downed && !G.merchant_open) {
@@ -925,64 +1279,50 @@ void ab_update(double dt, unsigned keys) {
     }
     if (keys & K_ATK) {
       if (G.p.cls == CLS_PROF && G.p.charge_t > 0) {
-        /* continua carica, spara al rilascio? semplifica: spara subito se carico */
         if (G.p.charge_t >= 0.8) ab_player_attack();
       } else ab_player_attack();
     } else {
       if (G.p.cls == CLS_PROF && G.p.charge_t >= 0.8) ab_player_attack();
-      else if (G.p.cls == CLS_PROF && G.p.charge_t > 0 && G.p.charge_t < 0.8) { /* annulla */ }
     }
   }
   if (G.p.atk_cd > 0) G.p.atk_cd -= dt;
   if (G.p.ability_cd > 0) G.p.ability_cd -= dt;
   if (G.p.iframes > 0) G.p.iframes -= dt;
   if (G.p.anim_t > 0) G.p.anim_t -= dt;
-  if (G.p.buff_rage_t > 0) G.p.buff_rage_t -= dt;
-  if (G.p.buff_shield_t > 0) G.p.buff_shield_t -= dt;
-  if (G.p.buff_haste_t > 0) G.p.buff_haste_t -= dt;
-  /* mana regen */
-  if (G.p.max_mp > 0 && G.p.mp < G.p.max_mp) {
-    static double acc = 0;
-    acc += dt;
-    if (acc > 1.5) { acc = 0; G.p.mp++; }
-  }
-  /* downed */
   if (G.p.downed && !G.p.dead) {
     G.p.downed_t -= dt;
     if (G.p.downed_t <= 0) {
       G.p.downed = false;
       G.p.dead = true;
       G.state = ST_DEAD;
+      G.p.gold = 0; G.p.potions = 0; G.p.mana_potions = 0;
+      memset(G.p.equip, 0, sizeof G.p.equip);
       if (G.depth > G.best_depth) G.best_depth = G.depth;
       ab_save_record();
+      ab_add_log("L'abisso ti ha reclamato.");
     }
   }
 
-  /* smoothing giocatore */
   G.p.rx += (G.p.x - G.p.rx) * fmin(1, dt * 12);
   G.p.ry += (G.p.y - G.p.ry) * fmin(1, dt * 12);
 
-  /* fog */
-  {
-    int px = (int)G.p.x, py = (int)G.p.y;
-    int R = 8;
-    for (int y = py - R; y <= py + R; y++)
-      for (int x = px - R; x <= px + R; x++) {
-        if (x < 0 || y < 0 || x >= G.map.w || y >= G.map.h) continue;
-        if (abs(x - px) + abs(y - py) <= R) G.map.visited[y][x] = 1;
-      }
+  static int last_fov_tx = -999, last_fov_ty = -999;
+  int ftx = (int)floor(G.p.x), fty = (int)floor(G.p.y);
+  if (ftx != last_fov_tx || fty != last_fov_ty) {
+    last_fov_tx = ftx; last_fov_ty = fty;
+    ab_update_fov();
   }
 
-  /* boss trigger: entra in arena */
-  if (G.map.has_arena && !G.boss_active) {
-    /* c'e ancora un boss vivo? */
-    bool alive = false;
+  /* trigger boss */
+  if (G.map.has_arena && !G.boss_active && !G.boss_dead) {
+    AbMonster *boss = NULL;
     for (int i = 0; i < MAX_MONSTERS; i++)
-      if (G.mons[i].active && G.mons[i].is_boss) { alive = true; break; }
-    if (alive) {
-      if (fabs(G.p.x - (G.map.arena_cx + 0.5)) < G.map.arena_w / 2.0 &&
-          fabs(G.p.y - (G.map.arena_cy + 0.5)) < G.map.arena_h / 2.0) {
+      if (G.mons[i].active && G.mons[i].is_boss) { boss = &G.mons[i]; break; }
+    if (boss) {
+      double dx = G.p.x - (G.map.arena_cx + 0.5), dy = G.p.y - (G.map.arena_cy + 0.5);
+      if (fabs(dx) < G.map.arena_w / 2.0 && fabs(dy) < G.map.arena_h / 2.0) {
         G.boss_active = true;
+        G.map.gates_closed = true;
         char b[96];
         snprintf(b, sizeof b, "%s si risveglia!", G.boss_name);
         ab_toast(b);
@@ -991,7 +1331,6 @@ void ab_update(double dt, unsigned keys) {
       }
     }
   }
-  /* boss bar */
   G.boss_hp = 0; G.boss_max = 1;
   for (int i = 0; i < MAX_MONSTERS; i++) {
     if (G.mons[i].active && G.mons[i].is_boss) {
@@ -1005,141 +1344,278 @@ void ab_update(double dt, unsigned keys) {
     AbMonster *m = &G.mons[i];
     if (!m->active) continue;
     if (m->hp <= 0) { kill_monster(i); continue; }
-    char ks[2] = {m->type, 0};
-    const AbMonDef *td = ab_mon_def(ks);
-    /* regen affix */
-    if (m->affix == 3 && m->hp < m->max_hp) {
-      m->regen_acc += dt * m->max_hp * 0.045;
+    const AbMonDef *td = ab_mon_def(m->type);
+    if (!td) { m->active = false; continue; }
+    if (m->is_boss && G.map.has_arena && !G.boss_active && !G.boss_dead) {
+      /* drago dormiente: resta nella tana */
+      double bx0 = G.map.arena_cx - G.map.arena_w / 2.0 + 0.45;
+      double bx1 = G.map.arena_cx + G.map.arena_w / 2.0 - 0.45;
+      double by0 = G.map.arena_cy - G.map.arena_h / 2.0 + 0.45;
+      double by1 = G.map.arena_cy + G.map.arena_h / 2.0 - 0.45;
+      if (m->x < bx0) m->x = bx0;
+      if (m->x > bx1) m->x = bx1;
+      if (m->y < by0) m->y = by0;
+      if (m->y > by1) m->y = by1;
+      m->rx = m->x; m->ry = m->y;
+      continue;
+    }
+    if (m->atk_cd > 0) m->atk_cd -= dt;
+    if (m->affix == 3) {
+      m->regen_acc += m->max_hp * 0.045 * dt;
       if (m->regen_acc >= 1) { int h = (int)m->regen_acc; m->regen_acc -= h; m->hp += h; if (m->hp > m->max_hp) m->hp = m->max_hp; }
     }
     if (m->dot_t > 0) {
-      m->dot_t -= dt;
-      m->dot_acc += dt;
-      if (m->dot_acc >= 0.5) {
-        m->dot_acc = 0;
-        m->hp -= 1;
-        if (m->hp <= 0) { kill_monster(i); continue; }
+      m->dot_t -= dt; m->dot_acc += dt;
+      if (m->dot_acc >= 0.5) { m->dot_acc = 0; m->hp -= 1; if (m->hp <= 0) { kill_monster(i); continue; } }
+    }
+
+    if (m->is_boss) {
+      /* ---- boss AI per varianti ---- */
+      if (!G.boss_active || G.p.dead) {
+        m->rx += (m->x - m->rx) * fmin(1, dt * 10);
+        m->ry += (m->y - m->ry) * fmin(1, dt * 10);
+        continue;
+      }
+      double pdx = G.p.x - m->x, pdy = G.p.y - m->y;
+      double pdd = sqrt(pdx*pdx + pdy*pdy);
+      if (pdd > 0.05) { m->facing_x = pdx / pdd; m->facing_y = pdy / pdd; }
+      /* volo drago */
+      if (m->type == 'D') {
+        if (m->fly_cd > 0) m->fly_cd -= dt;
+        if (m->fly_t > 0) {
+          m->fly_t -= dt;
+          if (m->fly_t <= 0) m->flying = false;
+        } else if (m->fly_cd <= 0) {
+          m->flying = true; m->fly_t = 5.0;
+          m->fly_cd = 8.5 + ((int)(G.time * 10 + i) % 25) / 10.0;
+          ab_add_log("Il Drago spicca il volo!");
+        }
+      }
+      double mspd = m->speed * (m->flying ? 1.5 : 1.0);
+      if (pdd > 1.0) {
+        double vx = pdx / (pdd + 0.001), vy = pdy / (pdd + 0.001);
+        try_move(&m->x, &m->y, vx * mspd * dt, vy * mspd * dt);
+      }
+      /* picchiata drago */
+      if (m->type == 'D') {
+        if (m->dive_t > 0) {
+          m->dive_t -= dt;
+          if (m->dive_t <= 0) {
+            if (ab_dist(G.p.x, G.p.y, m->dive_x, m->dive_y) < 2.0) hurt_player(17, false);
+            ab_burst(m->dive_x, m->dive_y, 20, 1, 0.5, 0.2, 5);
+            G.shake = 0.5;
+            m->spec_cd = 2.0;
+          }
+        } else if (m->spec_cd <= 0) {
+          m->dive_x = G.p.x; m->dive_y = G.p.y;
+          m->dive_t = 1.3;
+          m->spec_cd = 6.0;
+          ab_add_log("Il Drago punta la preda!");
+        }
+        if (m->spec_cd > 0) m->spec_cd -= dt;
+      }
+      /* soffio (D base, K ridotto) */
+      if ((m->type == 'D' || m->type == 'K')) {
+        if (m->breath_cd > 0) m->breath_cd -= dt;
+        double bdist = m->type == 'D' ? 3.2 : 2.6;
+        if (m->breath_cd <= 0 && pdd < bdist + 0.5) {
+          m->breath_cd = m->type == 'D' ? 4.2 : 5.2;
+          double ang = atan2(pdy, pdx);
+          for (int k = -2; k <= 2; k++) {
+            double a = ang + k * 0.22;
+            spawn_proj(m->x, m->y, cos(a), sin(a), 7, bdist, 10, false, 1, 0.5, 0.1, 0.5, true, false);
+          }
+          G.shake = 0.4;
+          ab_add_log(m->type == 'D' ? "Soffio di fuoco!" : "Soffio pestilenziale!");
+        }
+      }
+      /* palle di fuoco / sputi / tele */
+      if (m->fb_cd > 0) m->fb_cd -= dt;
+      if (m->fb_cd <= 0 && pdd < 9 && pdd > 1.2) {
+        double fspd = 3.6, fr = 1.4;
+        int fdmg = 13;
+        double fcr = 1, fcg = 0.5, fcb = 0.2;
+        bool fpois = false, fweb = false;
+        if (m->type == 'X') { fspd = 2.8; fr = 1.7; fdmg = 14; fcr = 0.79; fcg = 0.70; fcb = 0.54; }
+        else if (m->type == 'L') { fspd = 4.2; fr = 1.7; fdmg = 15; fcr = 0.54; fcg = 0.42; fcb = 1.0; }
+        else if (m->type == 'M') { fspd = 2.6; fr = 1.6; fdmg = 10; fcr = 0.49; fcg = 1.0; fcb = 0.60; }
+        else if (m->type == 'R') { fspd = 3.2; fr = 2.0; fdmg = 11; fcr = 0.88; fcg = 0.85; fcb = 0.80; fpois = true; fweb = true; }
+        else if (m->type == 'K') { fspd = 3.0; fr = 1.5; fdmg = 9; fcr = 0.79; fcg = 0.66; fcb = 0.39; }
+        m->fb_cd = 6.4;
+        spawn_proj(m->x, m->y, pdx, pdy, fspd, 10, fdmg / 2 + 4, false, fcr, fcg, fcb, fr, fpois, fweb);
+        ab_burst(m->x, m->y, 8, fcr, fcg, fcb, 3);
+      }
+      /* evocazioni */
+      if (m->summon_left > 0) {
+        if (m->spec_cd <= 0 || m->type != 'D') {
+          if (m->type != 'D') { summon_minions(m); m->spec_cd = 7.0; }
+        }
+      }
+      /* pestone golem */
+      if (m->type == 'X' && pdd < 2.2 && m->atk_cd <= 0) {
+        m->atk_cd = 1.5;
+        hurt_player(m->dmg, false);
+        ab_burst(G.p.x, G.p.y, 12, 0.8, 0.7, 0.5, 4);
+        G.shake = 0.45;
+        ab_add_log("Pestone del Golem!");
+      }
+      /* carica Re dei ratti */
+      if (m->type == 'K' && pdd > 3 && pdd < 8 && m->atk_cd <= 0) {
+        m->atk_cd = 4.0;
+        double vx = pdx / (pdd + 0.001), vy = pdy / (pdd + 0.001);
+        m->x += vx * 3; m->y += vy * 3;
+        G.shake = 0.4;
+        if (ab_dist(G.p.x, G.p.y, m->x, m->y) < 1.4) hurt_player(m->dmg, false);
+      }
+      /* contatto */
+      if (pdd < 0.9 && m->atk_cd <= 0) {
+        m->atk_cd = 1.2;
+        hurt_player(m->dmg, td->poison);
+      }
+      m->rx += (m->x - m->rx) * fmin(1, dt * 10);
+      m->ry += (m->y - m->ry) * fmin(1, dt * 10);
+      continue;
+    }
+
+    /* ---- IA comuni 1:1 ---- */
+    double ddx = G.p.x - m->x, ddy = G.p.y - m->y;
+    double dd = sqrt(ddx * ddx + ddy * ddy);
+    bool has_target = !G.p.dead && !G.p.downed && dd < m->aggro;
+    /* stati speciali in corso */
+    if (m->fx_mode == 2 || m->fx_mode == 3) { /* dash / swoop in volo */
+      m->fx_t += dt;
+      double vx = m->fx_tx - m->x, vy = m->fx_ty - m->y;
+      double l = sqrt(vx*vx + vy*vy);
+      if (l > 0.001) try_move(&m->x, &m->y, vx / l * m->fx_speed * dt, vy / l * m->fx_speed * dt);
+      double lim = m->fx_mode == 2 ? 0.55 : 0.62;
+      if (l < lim && !m->fx_hit) {
+        m->fx_hit = true;
+        hurt_player(m->dmg, td->poison || m->fx_mode == 2);
+      }
+      if (m->fx_t >= m->fx_dur) { m->fx_mode = 0; m->atk_cd = 0.25; }
+      m->rx += (m->x - m->rx) * fmin(1, dt * 10);
+      m->ry += (m->y - m->ry) * fmin(1, dt * 10);
+      continue;
+    }
+    if (m->fx_mode == 4) { /* bolt: il corpo vola */
+      m->fx_t += dt;
+      m->x += m->wx * dt; m->y += m->wy * dt;
+      if (m->fx_t >= m->fx_dur) { m->fx_mode = 0; ab_burst(m->x, m->y, 8, 0.7, 0.5, 1, 3); }
+      else if (ab_dist(G.p.x, G.p.y, m->x, m->y) <= 0.45) {
+        hurt_player(m->dmg, td->poison);
+        ab_burst(G.p.x, G.p.y, 12, 0.7, 0.5, 1, 3);
+        m->fx_mode = 0;
+      }
+      m->rx = m->x; m->ry = m->y;
+      continue;
+    }
+    if (m->dent_t > 0) {
+      m->dent_t -= dt;
+      if (m->dent_t <= 0 && ab_dist(m->x, m->y, G.p.x, G.p.y) <= 1.5) {
+        hurt_player(m->dmg, false);
+        m->atk_cd = 0.25;
       }
     }
-    if (m->atk_cd > 0) m->atk_cd -= dt;
-    double dd = ab_dist(G.p.x, G.p.y, m->x, m->y);
-    bool aggro = dd < m->aggro || (m->is_boss && G.boss_active);
-    double mvx = 0, mvy = 0;
-    if (!G.p.dead && !G.p.downed && aggro) {
-      double dx = G.p.x - m->x, dy = G.p.y - m->y;
-      double l = sqrt(dx*dx + dy*dy);
-      if (l > 0.05) {
-        /* erratic: zigzag */
-        if (td && td->erratic) {
-          double w = sin(G.time * 7 + i) * 0.8;
-          double nx = -dy / l, ny = dx / l;
-          mvx = dx / l + nx * w; mvy = dy / l + ny * w;
-          double ml = sqrt(mvx*mvx + mvy*mvy);
-          if (ml > 0.01) { mvx /= ml; mvy /= ml; }
+    if (m->fx_mode == 1) { /* carica attacco dedicato: fermo */
+      m->fx_t -= dt;
+      if (m->fx_t <= 0) {
+        m->fx_mode = 0;
+        m->atk_cd = 0.3;
+        if (m->wind_kind == 1) { m->fx_mode = 2; m->fx_t = 0; m->fx_dur = 0.24; m->fx_speed = 7.2; m->fx_hit = false; }
+        else if (m->wind_kind == 2) { m->fx_mode = 3; m->fx_t = 0; m->fx_dur = 0.30; m->fx_speed = 6.4; m->fx_hit = false; }
+        else if (m->wind_kind == 3) {
+          for (int k = 0; k < 1; k++) {
+            if (ab_dist(m->x, m->y, G.p.x, G.p.y) <= 1.8) hurt_player(m->dmg, false);
+          }
+          ab_burst(m->x, m->y, 14, 0.6, 0.6, 0.6, 4);
+          G.shake = 0.35;
+        } else if (m->wind_kind == 4) {
+          AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 91 + i));
+          double vx2 = G.p.x - m->x, vy2 = G.p.y - m->y;
+          double dd2 = sqrt(vx2*vx2 + vy2*vy2);
+          if (dd2 <= 1.6 && dd2 > 0.01) {
+            double dot = (vx2 / dd2) * m->facing_x + (vy2 / dd2) * m->facing_y;
+            if (dot >= 0.55) hurt_player(m->dmg + ab_rng_range(&rr, 0, 1), false);
+          }
+          ab_burst(m->x + m->facing_x, m->y + m->facing_y, 8, 0.9, 0.9, 0.9, 3);
+        }
+      }
+      m->rx += (m->x - m->rx) * fmin(1, dt * 10);
+      m->ry += (m->y - m->ry) * fmin(1, dt * 10);
+      continue;
+    }
+
+    if (has_target) {
+      double d = dd > 0.001 ? dd : 0.001;
+      double dx = ddx / d, dy = ddy / d;
+      m->facing_x = dx; m->facing_y = dy;
+      double reach = td->ranged_range > 0 ? td->ranged_range : 0.85;
+      if (dd > reach) {
+        double vx = dx, vy = dy;
+        if (td->erratic) {
+          AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 57 + i * 13));
+          if (ab_rng_next(&rr) < 0.03 * 60 * dt + 0.001) {
+            vx += ab_rng_frange(&rr, -0.7, 0.7);
+            vy += ab_rng_frange(&rr, -0.7, 0.7);
+          }
+        }
+        double mv = m->speed;
+        if (!in_safe((int)floor(m->x + vx * mv * dt), (int)floor(m->y + vy * mv * dt)) ||
+            in_safe((int)floor(m->x), (int)floor(m->y)))
+          try_move(&m->x, &m->y, vx * mv * dt, vy * mv * dt);
+      } else if (m->atk_cd <= 0 && !G.p.dead && !G.p.downed) {
+        AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 131 + i * 17));
+        if (td->dash) {
+          m->fx_mode = 1; m->wind_kind = 1; m->fx_t = 0.35;
+          m->fx_tx = G.p.x; m->fx_ty = G.p.y;
+          m->atk_cd = 2.0 + ab_rng_next(&rr) * 0.8;
+          ab_burst(m->x, m->y, 6, 0.5, 0.7, 0.4, 2);
+        } else if (td->swoop) {
+          m->fx_mode = 1; m->wind_kind = 2; m->fx_t = 0.35;
+          m->fx_tx = G.p.x; m->fx_ty = G.p.y;
+          m->atk_cd = 2.2 + ab_rng_next(&rr) * 0.8;
+        } else if (td->ranged_range > 0) {
+          double sp = td->beam ? 3.8 : 3.2;
+          double l = dd > 0.01 ? dd : 1;
+          m->fx_mode = 4; m->fx_t = 0;
+          double life = l / sp + 0.35;
+          if (life > 1.9) life = 1.9;
+          m->fx_dur = life;
+          m->wx = ddx / l * sp; m->wy = ddy / l * sp;
+          m->atk_cd = 2.1 + ab_rng_next(&rr) * 0.6;
+          ab_burst(m->x, m->y, 6, td->beam ? 0.5 : 0.7, td->beam ? 1.0 : 0.5, td->beam ? 0.5 : 0.8, 2);
+        } else if (td->dbl) {
+          m->atk_cd = 0.8 + ab_rng_next(&rr) * 0.2;
+          m->dent_t = 0.22;
+          hurt_player(m->dmg, false);
+        } else if (td->stomp) {
+          m->fx_mode = 1; m->wind_kind = 3; m->fx_t = 0.55;
+          m->atk_cd = 1.3 + ab_rng_next(&rr) * 0.4;
+        } else if (td->cone) {
+          m->fx_mode = 1; m->wind_kind = 4; m->fx_t = 0.45;
+          m->atk_cd = 1.15 + ab_rng_next(&rr) * 0.3;
         } else {
-          mvx = dx / l; mvy = dy / l;
-        }
-        /* dash serpente/mantide: scatti */
-        double sp = m->speed;
-        if (td && td->dash && dd > 2 && ((int)(G.time * 1.5 + i) % 3 == 0)) sp *= 2.2;
-        if (dd > 0.7) try_move(&m->x, &m->y, mvx * sp * dt, mvy * sp * dt);
-        m->facing_x = mvx; m->facing_y = mvy;
-        /* attacco contatto / proiettili sciamano/boss */
-        if (dd < 0.9 && m->atk_cd <= 0) {
-          m->atk_cd = 1.0;
-          hurt_player(m->dmg + ((td && td->poison) ? 2 : 0));
-          if (td && td->lifesteal) { m->hp += 2; if (m->hp > m->max_hp) m->hp = m->max_hp; }
-        }
-        /* sciamano e boss ranged */
-        if ((m->type == 'w' || m->is_boss) && dd < 8 && dd > 1.5 && m->atk_cd <= 0) {
-          m->atk_cd = m->is_boss ? 1.2 : 1.8;
-          double dx2 = G.p.x - m->x, dy2 = G.p.y - m->y;
-          spawn_proj(m->x, m->y, dx2, dy2, 6, 9, m->dmg / 2 + 1, false, 1, 0.4, 0.3);
+          m->atk_cd = 1.05 + ab_rng_next(&rr) * 0.3;
+          int extra = ab_rng_range(&rr, 0, 1);
+          hurt_player(m->dmg + extra, td->poison);
+          if (td->lifesteal) { m->hp += 2; if (m->hp > m->max_hp) m->hp = m->max_hp; }
         }
       }
     } else {
-      /* wander */
       m->wander_t -= dt;
       if (m->wander_t <= 0) {
-        AbRng r;
-        ab_rng_seed(&r, (uint32_t)(G.time * 61) + (uint32_t)i * 131 + 5);
-        double a = ab_rng_next(&r) * 6.28318;
-        m->wx = cos(a); m->wy = sin(a);
-        m->wander_t = ab_rng_frange(&r, 1, 3);
+        AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 61) + (uint32_t)i * 131 + 5);
+        double a = ab_rng_next(&rr) * 6.28318;
+        m->wx = m->x + cos(a) * 3; m->wy = m->y + sin(a) * 3;
+        m->wander_t = 2 + ab_rng_next(&rr) * 3;
       }
-      try_move(&m->x, &m->y, m->wx * m->speed * 0.3 * dt, m->wy * m->speed * 0.3 * dt);
-    }
-    /* boss special */
-    if (m->is_boss && G.boss_active && !G.p.dead) {
-      m->spec_cd -= dt;
-      if (m->spec_cd <= 0) {
-        m->spec_cd = 3.0 + (m->hp < m->max_hp / 2 ? -0.8 : 0);
-        m->boss_phase++;
-        if (m->type == 'D') {
-          /* soffio: ventaglio 5 */
-          for (int k = -2; k <= 2; k++) {
-            double a = atan2(G.p.y - m->y, G.p.x - m->x) + k * 0.2;
-            spawn_proj(m->x, m->y, cos(a), sin(a), 7, 7, m->dmg / 2 + 2, false, 1, 0.5, 0.1);
-          }
-          ab_add_log("Il Drago sputa fuoco!");
-          G.shake = 0.4;
-        } else if (m->type == 'X') {
-          /* carica */
-          double dx = G.p.x - m->x, dy = G.p.y - m->y;
-          double l = sqrt(dx*dx + dy*dy);
-          if (l > 0.1) { m->x += dx / l * 3; m->y += dy / l * 3; }
-          G.shake = 0.5;
-          ab_add_log("Il Golem carica!");
-          if (ab_dist(G.p.x, G.p.y, m->x, m->y) < 1.4) hurt_player(m->dmg);
-        } else if (m->type == 'M') {
-          /* evoca 2 melme */
-          for (int k = 0; k < 2; k++) {
-            for (int j = 0; j < MAX_MONSTERS; j++) {
-              if (G.mons[j].active) continue;
-              G.mons[j].active = true; G.mons[j].type = 'j';
-              G.mons[j].x = G.mons[j].rx = m->x + (k ? 1 : -1);
-              G.mons[j].y = G.mons[j].ry = m->y;
-              char js[2] = {'j', 0};
-              const AbMonDef *jd = ab_mon_def(js);
-              G.mons[j].max_hp = G.mons[j].hp = ab_scaled_stat(jd->hp, G.depth, 0.16);
-              G.mons[j].dmg = ab_scaled_stat(jd->dmg, G.depth, 0.11);
-              G.mons[j].speed = jd->speed; G.mons[j].aggro = 99;
-              G.mons[j].is_boss = false; G.mons[j].affix = 0; G.mons[j].atk_cd = 0;
-              break;
-            }
-          }
-          ab_add_log("La Regina evoca melme!");
-        } else if (m->type == 'R') {
-          /* telegrafo area: danno se resti vicino dopo 1s -> semplifica danno immediato + shake */
-          G.shake = 0.45;
-          ab_burst(G.p.x, G.p.y, 14, 0.6, 0.2, 0.5, 4);
-          if (ab_dist(G.p.x, G.p.y, m->x, m->y) < 3.0) hurt_player(m->dmg / 2 + 2);
-          ab_add_log("Il Re Ragno tesse la tela!");
-        } else if (m->type == 'K') {
-          for (int k = 0; k < 2; k++) {
-            for (int j = 0; j < MAX_MONSTERS; j++) {
-              if (G.mons[j].active) continue;
-              G.mons[j].active = true; G.mons[j].type = 'r';
-              G.mons[j].x = G.mons[j].rx = m->x + (k ? 1 : -1);
-              G.mons[j].y = G.mons[j].ry = m->y;
-              char js[2] = {'r', 0};
-              const AbMonDef *jd = ab_mon_def(js);
-              G.mons[j].max_hp = G.mons[j].hp = ab_scaled_stat(jd->hp, G.depth, 0.16);
-              G.mons[j].dmg = ab_scaled_stat(jd->dmg, G.depth, 0.11);
-              G.mons[j].speed = jd->speed * 1.3; G.mons[j].aggro = 99;
-              G.mons[j].is_boss = false; G.mons[j].affix = 0; G.mons[j].atk_cd = 0;
-              break;
-            }
-          }
-          ab_add_log("Il Re dei Ratti fischia il branco!");
-        } else if (m->type == 'L') {
-          for (int k = -1; k <= 1; k++) {
-            double a = atan2(G.p.y - m->y, G.p.x - m->x) + k * 0.35;
-            spawn_proj(m->x, m->y, cos(a), sin(a), 6, 10, m->dmg / 2 + 1, false, 0.5, 1, 0.6);
-          }
-          ab_add_log("Il Lich evoca anime!");
-        }
-        ab_burst(m->x, m->y, 12, 1, 0.5, 0.2, 4);
+      double dx = m->wx - m->x, dy = m->wy - m->y;
+      double d = sqrt(dx*dx + dy*dy);
+      if (d > 0.35) {
+        if (!in_safe((int)floor(m->x + dx / d * m->speed * 0.55 * dt), (int)floor(m->y + dy / d * m->speed * 0.55 * dt)) ||
+            in_safe((int)floor(m->x), (int)floor(m->y)))
+          try_move(&m->x, &m->y, dx / d * m->speed * 0.55 * dt, dy / d * m->speed * 0.55 * dt);
+        m->facing_x = dx / d; m->facing_y = dy / d;
       }
     }
     m->rx += (m->x - m->rx) * fmin(1, dt * 10);
@@ -1173,12 +1649,108 @@ void ab_update(double dt, unsigned keys) {
         }
       }
     } else {
-      if (!G.p.dead && ab_dist(p->x, p->y, G.p.x, G.p.y) < 0.45) {
-        hurt_player(p->dmg);
+      if (!G.p.dead && ab_dist(p->x, p->y, G.p.x, G.p.y) < p->hit_r) {
+        hurt_player(p->dmg, p->poison);
+        if (p->web) { G.p.web_t = 3.0; ab_add_log("Intrappolato nella tela!"); }
         p->active = false;
       }
     }
   }
+
+  /* oggetti a terra */
+  if (!G.p.dead && !G.p.downed) {
+    for (int i = 0; i < MAX_ITEMS; i++) {
+      AbItem *it = &G.items[i];
+      if (!it->active) continue;
+      double dx = G.p.x - it->x, dy = G.p.y - it->y;
+      if (dx * dx + dy * dy > 0.62 * 0.62) continue;
+      it->active = false;
+      if (it->kind == 0) {
+        G.p.gold += it->amount;
+        char b[32]; snprintf(b, sizeof b, "+%d", it->amount);
+        ab_float_text(G.p.x, G.p.y - 0.7, b, 0.83, 0.69, 0.22);
+      } else if (it->kind == 1) {
+        G.p.gold += it->amount;
+        char b[48]; snprintf(b, sizeof b, "+%d gemma", it->amount);
+        ab_float_text(G.p.x, G.p.y - 0.7, b, 0.56, 0.82, 1.0);
+        ab_add_log("Gemma preziosa: oro!");
+      } else if (it->kind == 2) {
+        G.p.buffs[it->buff] = BUFF_DURATION[it->buff];
+        char b[48]; snprintf(b, sizeof b, "%s!", BUFF_NAMES[it->buff]);
+        ab_float_text(G.p.x, G.p.y - 0.7, b, 0.6, 1, 0.6);
+        ab_add_log("Potenziamento raccolto.");
+      } else if (it->kind == 3) {
+        G.p.potions += it->amount;
+        ab_float_text(G.p.x, G.p.y - 0.7, "+pozione", 0.76, 0.27, 0.23);
+      } else if (it->kind == 4) {
+        G.p.mana_potions += it->amount;
+        ab_float_text(G.p.x, G.p.y - 0.7, "+mana", 0.37, 0.63, 0.79);
+      } else if (it->kind == 5) {
+        equip_or_keep(it->slot, it->rarity, it->st_hp, it->st_dmg, it->st_spd, it->st_arm);
+      }
+    }
+  }
+
+  /* respawn come hostRespawnTick */
+  respawn_t -= dt;
+  {
+    int cap = 9 + G.depth * 2;
+    if (cap > 30) cap = 30;
+    int alive = 0;
+    for (int i = 0; i < MAX_MONSTERS; i++) if (G.mons[i].active) alive++;
+    if (respawn_t <= 0) {
+      AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 77 + 1));
+      respawn_t = 13 + ab_rng_next(&rr) * 11;
+      if (alive < cap && mon_spot_n > 0) {
+        int si = ab_rng_range(&rr, 0, mon_spot_n - 1);
+        static const char pool[] = {'r','b','g','j','J','s','o','z','S','W','k','h','C','c','m','q','G'};
+        int tot = 0;
+        for (size_t k = 0; k < sizeof pool; k++) tot += ab_mon_weight(pool[k], G.depth);
+        if (tot > 0) {
+          int roll = 1 + (int)(ab_rng_next(&rr) * tot);
+          char tk = 'g';
+          for (size_t k = 0; k < sizeof pool; k++) {
+            roll -= ab_mon_weight(pool[k], G.depth);
+            if (roll <= 0) { tk = pool[k]; break; }
+          }
+          const AbMonDef *td = ab_mon_def(tk);
+          for (int j = 0; j < MAX_MONSTERS; j++) {
+            if (G.mons[j].active) continue;
+            G.mons[j].active = true; G.mons[j].type = tk;
+            G.mons[j].x = G.mons[j].rx = mon_spots[si][0] + 0.5;
+            G.mons[j].y = G.mons[j].ry = mon_spots[si][1] + 0.5;
+            G.mons[j].max_hp = G.mons[j].hp = ab_scaled_stat(td->hp, G.depth, 0.16);
+            G.mons[j].dmg = ab_scaled_stat(td->dmg, G.depth, 0.11);
+            G.mons[j].speed = td->speed; G.mons[j].aggro = td->aggro;
+            G.mons[j].is_boss = false; G.mons[j].affix = 0; G.mons[j].atk_cd = 0;
+            G.mons[j].fx_mode = 0; G.mons[j].dent_t = 0;
+            break;
+          }
+        }
+      }
+    }
+  }
+  power_t -= dt;
+  if (power_t <= 0) {
+    AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 55 + 2));
+    power_t = 30 + ab_rng_next(&rr) * 20;
+    bool has = false;
+    for (int i = 0; i < MAX_ITEMS; i++)
+      if (G.items[i].active && G.items[i].kind == 2) { has = true; break; }
+    if (!has && pow_spot_n > 0) {
+      for (int i = 0; i < MAX_ITEMS; i++) {
+        if (G.items[i].active) continue;
+        int si = ab_rng_range(&rr, 0, pow_spot_n - 1);
+        G.items[i].active = true;
+        G.items[i].x = pow_spots[si][0] + 0.5;
+        G.items[i].y = pow_spots[si][1] + 0.5;
+        G.items[i].kind = 2;
+        G.items[i].buff = ab_rng_range(&rr, 0, BUFF_COUNT - 1);
+        break;
+      }
+    }
+  }
+
   /* particelle/float */
   for (int i = 0; i < MAX_PARTS; i++) {
     if (!G.parts[i].active) continue;

@@ -232,6 +232,7 @@ typedef struct {
   int w, h;
   uint8_t tiles[MAP_MAX_H][MAP_MAX_W];
   uint8_t visited[MAP_MAX_H][MAP_MAX_W];
+  uint8_t visible[MAP_MAX_H][MAP_MAX_W];
   int spawn_x, spawn_y;
   int stairs_x, stairs_y;
   int merch_x, merch_y;

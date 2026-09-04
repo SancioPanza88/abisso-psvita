@@ -847,10 +847,10 @@ static void draw_merchant(void) {
   draw_text(SCR_W / 2 - 60, SCR_H / 2 - 104, b, 2, 212, 175, 55);
   /* 4 voci come la web, prezzi in base al piano */
   char items[4][48];
-  snprintf(items[0], sizeof items[0], "POZIONE HP %DG", ab_merchant_price(0));
-  snprintf(items[1], sizeof items[1], "POZIONE MANA %DG", ab_merchant_price(1));
-  snprintf(items[2], sizeof items[2], "POTENZIAM. %DG", ab_merchant_price(2));
-  snprintf(items[3], sizeof items[3], "EQUIP %DG", ab_merchant_price(3));
+  snprintf(items[0], sizeof items[0], "POZIONE HP %dG", ab_merchant_price(0));
+  snprintf(items[1], sizeof items[1], "POZIONE MANA %dG", ab_merchant_price(1));
+  snprintf(items[2], sizeof items[2], "POTENZIAM. %dG", ab_merchant_price(2));
+  snprintf(items[3], sizeof items[3], "EQUIP %dG", ab_merchant_price(3));
   for (int i = 0; i < 4; i++) {
     int y = SCR_H / 2 - 76 + i * 34;
     bool hi = (i == merch_sel);

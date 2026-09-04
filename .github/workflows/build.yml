@@ -24,6 +24,8 @@ jobs:
           vdpm update || true
           vdpm install sdl2 || true
           vdpm install sdl2_image || true
+          vdpm install libwebp || true
+          vdpm install webp || true
           arm-vita-eabi-gcc --version
           cmake --version
           ls "$VITASDK/share/vita.toolchain.cmake"

@@ -1982,7 +1982,6 @@ void ab_update(double dt, unsigned keys) {
       }
     }
   }
-  }
   power_t -= dt;
   if (power_t <= 0 && (net_role != NET_JOIN || !net_connected)) {
     AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 55 + 2));

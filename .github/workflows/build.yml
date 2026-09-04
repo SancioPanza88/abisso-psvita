@@ -35,9 +35,14 @@ jobs:
 
       - name: Build
         run: |
-          set -o pipefail
-          cmake --build build -j$(nproc) 2>&1 | tee build/build.log
-          ls -lh build/*.vpk build/eboot.bin || ls -lh build/
+          pwd
+          ls -la
+          ls -la build/
+          cmake --build build -j$(nproc) > build/build.log 2>&1
+          echo "CMAKE_EXIT=$?"
+          tail -60 build/build.log
+          ls -lh build/
+          test -f build/abisso.vpk && test -f build/eboot.bin
 
       - name: Report build errors (public commit comment)
         if: failure()
@@ -45,10 +50,14 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            let log = '(build.log mancante)';
-            try { log = fs.readFileSync('build/build.log', 'utf8'); } catch (e) {}
-            const keep = log.split('\n').filter(l => /error|undefined reference|cannot find|No such|FAILED/i.test(l)).slice(-30);
-            const body = 'Build VPK fallita, errori:\n```\n' + (keep.join('\n') || log.slice(-2000)) + '\n```';
+            const path = require('path');
+            const ws = process.env.GITHUB_WORKSPACE || '.';
+            let listing = '';
+            try { listing = fs.readdirSync(path.join(ws, 'build')).join(', '); } catch (e) { listing = 'build/ illeggibile: ' + e.message; }
+            let log = '(build/build.log mancante)';
+            try { log = fs.readFileSync(path.join(ws, 'build', 'build.log'), 'utf8'); } catch (e) { log = '(build/build.log mancante: ' + e.message + ')'; }
+            const tail = log.split('\n').slice(-60).join('\n');
+            const body = 'Build VPK fallita.\nFile in build/: ' + listing + '\n```\n' + tail + '\n```';
             await github.rest.repos.createCommitComment({
               owner: context.repo.owner, repo: context.repo.repo,
               commit_sha: context.sha, body: body.slice(0, 6000)

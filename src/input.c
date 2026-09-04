@@ -81,10 +81,12 @@ unsigned in_poll(double dt) {
   if (kb[SDL_SCANCODE_F]) k |= K_ABIL;
   /* M/V/H/N edge: il main li gestisce con debounce, qui level va bene */
   if (kb[SDL_SCANCODE_M]) k |= K_MAP;
-  if (kb[SDL_SCANCODE_V]) k |= K_VIEW;
   if (kb[SDL_SCANCODE_H] || kb[SDL_SCANCODE_F1]) k |= K_HELP;
   if (kb[SDL_SCANCODE_N]) k |= K_MUTE;
   if (kb[SDL_SCANCODE_ESCAPE]) k |= K_PAUSE;
+  /* PC: zoom anche con + / - */
+  if (kb[SDL_SCANCODE_KP_PLUS] || kb[SDL_SCANCODE_EQUALS]) k |= K_ZIN;
+  if (kb[SDL_SCANCODE_KP_MINUS] || kb[SDL_SCANCODE_MINUS]) k |= K_ZOUT;
 
   /* controller SDL (su Vita: stick + tasti mappati da SDL) */
   if (pad) {
@@ -105,16 +107,13 @@ unsigned in_poll(double dt) {
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X)) k |= K_POT;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y)) k |= K_MANA;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) k |= K_ABIL;
-    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) k |= K_VIEW;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)) k |= K_MAP;
     if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK)) k |= K_HELP;
-    /* stick destro = attacco direzionale */
-    Sint16 rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
-    Sint16 ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
-    if (rx < -8000) k |= K_LEFT;
-    if (rx > 8000) k |= K_RIGHT;
-    if (ry < -8000) k |= K_UP;
-    if (ry > 8000) k |= K_DOWN;
+    /* stick destro su/giu = zoom (non muove) */
+    Sint16 rz = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
+    Sint16 rx2 = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
+    if (rz < -8000 || rx2 > 8000) k |= K_ZIN;
+    if (rz > 8000 || rx2 < -8000) k |= K_ZOUT;
   } else {
     /* joystick grezzo (fallback Vita se controller db manca) */
     if (SDL_NumJoysticks() > 0) {
@@ -132,9 +131,11 @@ unsigned in_poll(double dt) {
         if (SDL_JoystickGetButton(j, 2)) k |= K_POT;
         if (SDL_JoystickGetButton(j, 3)) k |= K_MANA;
         if (SDL_JoystickGetButton(j, 5)) k |= K_ABIL;
-        if (SDL_JoystickGetButton(j, 4)) k |= K_VIEW;
         if (SDL_JoystickGetButton(j, 9)) k |= K_MAP;
         if (SDL_JoystickGetButton(j, 8)) k |= K_HELP;
+        /* stick destro su/giu = zoom */
+        if (SDL_JoystickGetAxis(j, 3) < -8000 || SDL_JoystickGetAxis(j, 2) > 8000) k |= K_ZIN;
+        if (SDL_JoystickGetAxis(j, 3) > 8000 || SDL_JoystickGetAxis(j, 2) < -8000) k |= K_ZOUT;
         SDL_JoystickClose(j);
       }
     }

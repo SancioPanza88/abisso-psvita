@@ -9,6 +9,7 @@ void au_update(double dt);
 /* SFX */
 void sfx_attack(void);
 void sfx_hit(void);
+void sfx_hurt(void);
 void sfx_pickup(void);
 void sfx_potion(void);
 void sfx_stairs(void);

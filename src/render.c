@@ -325,6 +325,7 @@ static void draw_spr(const char *name, double sx, double sy, double scale, doubl
 /* ---------- stati UI ---------- */
 static int login_field = 0;
 static int class_sel = 0;
+static bool class_ok = false;
 static int merch_sel = 0;
 static char osk_buf_name[MAX_NAME] = "Viandante";
 static char osk_buf_room[MAX_ROOM] = "abisso";
@@ -346,8 +347,6 @@ static void draw_world(void) {
     shy = cos(G.time * 55) * G.shake * 14;
   }
 
-  double flick = 0.9 + 0.1 * sin(G.torch_clk * 3.1) + 0.04 * sin(G.torch_clk * 7.7);
-
   for (int y = y0; y < y1; y++) {
     for (int x = x0; x < x1; x++) {
       bool vis = G.map.visible[y][x] ? true : false;
@@ -357,13 +356,15 @@ static void draw_world(void) {
       w2s(x + 0.5, y + 0.5, &sx, &sy);
       sx += shx; sy += shy;
       if (sx < -t * 2 || sy < -t * 2 || sx > SCR_W + t * 2 || sy > SCR_H + t * 2) continue;
-      double alpha = vis ? flick : 0.32;
+      /* hash per-tile come la web per le variazioni */
+      unsigned th = (unsigned)((x * 374761393u + y * 668265263u) & 0xFFFFFFFFu) % 100;
+      double alpha = vis ? 1.0 : 0.32;
       if (tl == T_WALL) {
-        const char *sn = ((x + y) % 2) ? "wall_stone" : "wall_brick";
-        draw_spr(sn, sx, sy, G.view == 1 ? 1.0 : 1.05, alpha);
-        /* bordo superiore illuminato se sopra c'e pavimento (profondita) */
+        /* muri: una sola texture (wall_stone) come l'originale */
+        draw_spr("wall_stone", sx, sy, 1.05, alpha);
+        /* smusso 3D: bordo chiaro in alto */
         if (y > 0 && G.map.tiles[y-1][x] != T_WALL) {
-          draw_box((int)(sx - t / 2), (int)(sy - t / 2), (int)t + 1, 3, 200, 170, 120, (Uint8)(90 * alpha), true);
+          draw_box((int)(sx - t / 2), (int)(sy - t / 2), (int)t + 1, 3, 255, 232, 196, (Uint8)(31 * alpha), true);
         }
       } else if (tl == T_STAIRS) {
         draw_spr("floor_stone", sx, sy, 1.05, alpha);
@@ -372,16 +373,25 @@ static void draw_world(void) {
           232, 161, 61, (Uint8)(90 * stPulse * alpha), true);
         draw_spr("stairs", sx, sy, 0.8, alpha);
       } else {
-        const char *sn = ((x + y) % 2) ? "floor_stone" : "floor_dirt";
-        draw_spr(sn, sx, sy, G.view == 1 ? 1.0 : 1.05, alpha);
+        /* pavimento: una sola texture (floor_stone) come l'originale */
+        draw_spr("floor_stone", sx, sy, 1.05, alpha);
+        /* bordi cella + pietrisco come la web */
+        draw_box((int)(sx - t / 2), (int)(sy + t / 2) - 1, (int)t + 1, 1, 0, 0, 0, (Uint8)(82 * alpha), true);
+        draw_box((int)(sx + t / 2) - 1, (int)(sy - t / 2), 1, (int)t + 1, 0, 0, 0, (Uint8)(82 * alpha), true);
+        if (th > 84) {
+          int pxx = (int)(sx - t / 2 + 2 + (th * 7 % 100) / 100.0 * (t - 4));
+          int pyy = (int)(sy - t / 2 + 2 + (th * 13 % 100) / 100.0 * (t - 4));
+          draw_box(pxx, pyy, 2, 2, 0, 0, 0, (Uint8)(89 * alpha), true);
+        }
       }
-      /* alone caldo attorno alle torce */
+      /* alone caldo attorno alle torce (solo questo tremola) */
       if (vis) {
         for (int i = 0; i < G.torch_count; i++) {
           double dt2 = ab_dist(G.torches[i].tx + 0.5, G.torches[i].ty + 0.5, x + 0.5, y + 0.5);
           if (dt2 < 2.6) {
+            double fl = 0.9 + 0.1 * sin(G.torch_clk * 3.1) + 0.04 * sin(G.torch_clk * 7.7);
             draw_box((int)(sx - t / 2), (int)(sy - t / 2), (int)t + 1, (int)t + 1,
-              255, 190, 120, (Uint8)(26 * flick), true);
+              255, 190, 120, (Uint8)(26 * fl), true);
             break;
           }
         }
@@ -445,7 +455,7 @@ static void draw_world(void) {
       if (tx < 0 || ty < 0 || tx >= G.map.w || ty >= G.map.h) continue;
       if (!G.map.visible[ty][tx]) continue;
       order[n].kind = 0; order[n].idx = i;
-      order[n].depth = G.view == 1 ? G.mons[i].rx + G.mons[i].ry : G.mons[i].ry;
+      order[n].depth = G.mons[i].ry;
       n++;
     }
   /* insertion sort */
@@ -729,7 +739,7 @@ static void draw_hud(void) {
   }
   /* zoom/mute/view hint */
   char h[96];
-  snprintf(h, sizeof h, "Z %.1f %s %s", G.zoom, G.view ? "ISO" : "TOP", G.mute ? "MUTE" : "SND");
+  snprintf(h, sizeof h, "Z %.1f %s", G.zoom, G.mute ? "MUTE" : "SND");
   draw_text(SCR_W - 250, SCR_H - 26, h, 2, 160, 150, 130);
   /* riga diagnostica: verifica mappa/sprite */
   {
@@ -744,7 +754,7 @@ static void draw_hud(void) {
     draw_text(SCR_W - 330, SCR_H - 42, dg, 1, 120, 120, 120);
   }
   /* controlli Vita */
-  draw_text(12, SCR_H - 26, "X ATK O USA Q XYZ R MANA R1 ABIL", 1, 140, 130, 115);
+  draw_text(12, SCR_H - 26, "X ATK - O USA - QUAD HP - TRIANG MANA - R1 ABIL", 1, 140, 130, 115);
 }
 
 static void draw_minimap(void) {
@@ -811,7 +821,6 @@ static void draw_minimap(void) {
     double pulse = 2.2 + 0.5 * sin(G.torch_clk * 5);
     draw_disc((int)(ox + G.p.x * s), (int)(oy + G.p.y * s), (int)pulse + 1, 255, 255, 255, 255);
   }
-  if (G.view != 0) draw_text(x0 + mw - 90, y0 + 4, "ISOMETRICA", 1, 200, 200, 200);
 }
 
 static void draw_help(void) {
@@ -823,7 +832,7 @@ static void draw_help(void) {
     "STICK/D-PAD MUOVI   X ATTACCO",
     "O INTERAGISCI  QUAD POZIONE HP",
     "TRIANG POZIONE MANA  R1 ABILITA",
-    "L1 VISTA  START MAPPA  SELECT AIUTO",
+    "STICK DX ZOOM  START MAPPA  SELECT AIUTO",
     "TOUCH/MOUSE NEI MENU",
     "SCENDI LE SCALE, APRI FORZIERI,",
     "COMPRA DAL MERCANTE, UCCIDI I 6 BOSS",
@@ -946,10 +955,12 @@ static void login_draw(unsigned keys) {
   if (in_enter) {
     in_consume_text();
     G.state = ST_CLASS;
+    class_ok = false;
     sfx_click();
   }
   if (btn(330, 508, 300, 36, "AVANTI > SCEGLI EROE", true)) {
     G.state = ST_CLASS;
+    class_ok = false;
   }
   draw_text(230, 150 + 398, "X/INVIO AVANTI - TOUCH PER SCRIVERE", 1, 130, 120, 110);
 }
@@ -984,23 +995,33 @@ static void class_draw(unsigned keys) {
     char b[64];
     snprintf(b, sizeof b, "HP%d %s", c->hp, c->ranged ? "RANGED" : "MELEE");
     draw_text(cx + 84, cy + 32, b, 1, 200, 190, 170);
-    snprintf(b, sizeof b, "DMG%d-%d VEL%.1F", c->dmg_min, c->dmg_max, c->speed);
+    snprintf(b, sizeof b, "DMG%d-%d VEL%.1f", c->dmg_min, c->dmg_max, c->speed);
     draw_text(cx + 84, cy + 48, b, 1, 200, 190, 170);
     draw_text(cx + 10, cy + 84, c->ability_name, 1, 127, 200, 120);
+    if (class_ok && i == class_sel)
+      draw_text(cx + cw - 90, cy + 84, "PRONTO!", 1, 140, 255, 140);
     if (in_mouse_pressed && in_mouse_x >= cx && in_mouse_x < cx + cw && in_mouse_y >= cy && in_mouse_y < cy + chh) {
       in_consume_click();
-      class_sel = i;
-      sfx_click();
+      if (class_sel == i && class_ok) {
+        class_ok = false;
+        ab_new_run(osk_buf_name, class_sel, osk_buf_room);
+        sfx_stairs();
+      } else {
+        class_sel = i;
+        class_ok = true;
+        sfx_click();
+      }
     }
   }
   const AbClassDef *c = ab_class_def(class_sel);
   draw_text(60, 470, c->desc, 2, 180, 170, 155);
   if (btn(SCR_W / 2 - 150, 496, 300, 36, "SCENDI NELL'ABISSO", true) || in_enter) {
     in_consume_text();
+    class_ok = false;
     ab_new_run(osk_buf_name, class_sel, osk_buf_room);
     sfx_stairs();
   }
-  draw_text(60, 500, "D-PAD SCEGLI - X CONFERMA", 1, 130, 120, 110);
+  draw_text(60, 500, "X SELEZIONA - X DI NUOVO PER PARTIRE", 1, 130, 120, 110);
 }
 
 static void dead_draw(void) {
@@ -1069,7 +1090,8 @@ void ren_frame(unsigned keys) {
   if (pressed & K_MUTE) { G.mute = !G.mute; ab_save_record(); }
   if (G.state == ST_GAME) {
     if (pressed & K_MAP) { G.minimap = !G.minimap; sfx_click(); }
-    if (pressed & K_VIEW) { G.view = (G.view + 1) % 2; ab_toast(G.view ? "VISTA ISOMETRICA" : "VISTA DALL'ALTO"); sfx_click(); }
+    /* vista fissa topdown (isometrica rimossa) */
+    G.view = 0;
     if (pressed & K_HELP) { G.help = !G.help; sfx_click(); }
     if (pressed & K_POT) { ab_drink_potion(); sfx_potion(); }
     if (pressed & K_MANA) { ab_drink_mana(); sfx_potion(); }
@@ -1119,17 +1141,25 @@ void ren_frame(unsigned keys) {
   if (G.state == ST_LOGIN) {
     /* nav tastiera/controller */
     if (pressed & (K_UP | K_DOWN)) { login_field = 1 - login_field; sfx_click(); }
-    if (pressed & K_ATK) { G.state = ST_CLASS; sfx_click(); }
+    if (pressed & K_ATK) { G.state = ST_CLASS; class_ok = false; sfx_click(); }
   } else if (G.state == ST_CLASS) {
-    if (pressed & K_LEFT) { class_sel = (class_sel + CLS_COUNT - 1) % CLS_COUNT; sfx_click(); }
-    if (pressed & K_RIGHT) { class_sel = (class_sel + 1) % CLS_COUNT; sfx_click(); }
-    if (pressed & K_UP) { class_sel = (class_sel + CLS_COUNT - 3) % CLS_COUNT; sfx_click(); }
-    if (pressed & K_DOWN) { class_sel = (class_sel + 3) % CLS_COUNT; sfx_click(); }
+    /* selezione a due passi: prima scegli (evidenzia), poi X sulla carta
+     * gia scelta (o SCENDI / INVIO) per partire davvero */
+    if (pressed & K_LEFT) { class_sel = (class_sel + CLS_COUNT - 1) % CLS_COUNT; class_ok = false; sfx_click(); }
+    if (pressed & K_RIGHT) { class_sel = (class_sel + 1) % CLS_COUNT; class_ok = false; sfx_click(); }
+    if (pressed & K_UP) { class_sel = (class_sel + CLS_COUNT - 3) % CLS_COUNT; class_ok = false; sfx_click(); }
+    if (pressed & K_DOWN) { class_sel = (class_sel + 3) % CLS_COUNT; class_ok = false; sfx_click(); }
     if (pressed & K_ATK) {
-      ab_new_run(osk_buf_name, class_sel, osk_buf_room);
-      sfx_stairs();
+      if (class_ok) {
+        class_ok = false;
+        ab_new_run(osk_buf_name, class_sel, osk_buf_room);
+        sfx_stairs();
+      } else {
+        class_ok = true;
+        sfx_click();
+      }
     }
-    if (pressed & K_PAUSE) { G.state = ST_LOGIN; }
+    if (pressed & K_PAUSE) { G.state = ST_LOGIN; class_ok = false; }
   } else if (G.state == ST_DEAD) {
     if (pressed & K_ATK) { G.state = ST_LOGIN; osk_inited = false; }
   }

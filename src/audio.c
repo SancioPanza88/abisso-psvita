@@ -40,6 +40,7 @@ static void play(int type, double f0, double f1, double dur, double vol) {
 
 void sfx_attack(void) { play(2, 900, 300, 0.12, 0.35); play(0, 220, 110, 0.08, 0.25); }
 void sfx_hit(void) { play(2, 500, 150, 0.15, 0.4); }
+void sfx_hurt(void) { play(0, 180, 70, 0.25, 0.45); play(2, 300, 120, 0.2, 0.35); }
 void sfx_pickup(void) { play(0, 660, 990, 0.12, 0.3); play(0, 990, 1320, 0.1, 0.25); }
 void sfx_potion(void) { play(1, 300, 600, 0.25, 0.35); }
 void sfx_stairs(void) { play(0, 220, 440, 0.2, 0.3); play(0, 330, 660, 0.2, 0.3); }

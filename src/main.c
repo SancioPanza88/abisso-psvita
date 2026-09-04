@@ -31,6 +31,11 @@ int main(int argc, char *argv[]) {
 
     unsigned keys = in_poll(dt);
     if (in_quit_requested) break;
+    /* zoom (stick destro / +/-): solo scala mondo->schermo */
+    static bool was_zoom = false;
+    if (keys & K_ZIN) { G.zoom += dt * 0.9; if (G.zoom > 2.0) G.zoom = 2.0; was_zoom = true; }
+    if (keys & K_ZOUT) { G.zoom -= dt * 0.9; if (G.zoom < 0.6) G.zoom = 0.6; was_zoom = true; }
+    if (was_zoom && !(keys & (K_ZIN | K_ZOUT))) { was_zoom = false; ab_save_record(); }
     if (keys & K_PAUSE) {
       /* ESC: esci da help/mercante, oppure chiudi app dal login */
       if (G.state == ST_GAME) {

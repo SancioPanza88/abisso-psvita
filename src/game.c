@@ -2,6 +2,7 @@
  * RNG, scaling, pesi spawn, dungeon, FOV, danni, equip, mercante, boss.
  */
 #include "abisso.h"
+#include "audio.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -992,6 +993,7 @@ static void hurt_player(int dmg, bool poison) {
   G.p.hp -= fin;
   if (G.p.hp < 0) G.p.hp = 0;
   G.shake = 0.3;
+  sfx_hurt();
   char b[16]; snprintf(b, sizeof b, "-%d", fin);
   ab_float_text(G.p.x, G.p.y - 0.6, b, 1, 0.3, 0.3);
   ab_burst(G.p.x, G.p.y, 6, 1, 0.2, 0.2, 3);
@@ -1064,6 +1066,7 @@ void ab_player_attack(void) {
   G.p.atk_cd = c->atk_cooldown * (G.p.buffs[BUFF_FOCUS] > 0 ? 0.5 : 1.0);
   G.p.anim_t = 0.22;
   if (c->max_mp > 0 && c->mana_cost) { G.p.mp -= c->mana_cost; if (G.p.mp < 0) G.p.mp = 0; }
+  sfx_attack();
   double ar = c->ranged ? c->range : (c->range + 0.7 > 2.1 ? c->range + 0.7 : 2.1);
   AbMonster *nm = nearest_mon(ar, true);
   if (nm) {
@@ -1079,6 +1082,7 @@ void ab_player_attack(void) {
     ab_burst(G.p.x, G.p.y, 10, 0.5, 1, 1, 4);
   }
   if (!c->ranged) {
+    bool any_hit = false;
     for (int i = 0; i < MAX_MONSTERS; i++) {
       if (!G.mons[i].active) continue;
       double dx = G.mons[i].rx - G.p.x, dy = G.mons[i].ry - G.p.y;
@@ -1090,11 +1094,13 @@ void ab_player_attack(void) {
       bool cr = false;
       int amount = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5);
       G.mons[i].hp -= amount;
+      any_hit = true;
       G.mons[i].facing_x = -G.p.fx; G.mons[i].facing_y = -G.p.fy;
       char b[16]; snprintf(b, sizeof b, cr ? "%d!" : "%d", amount);
       ab_float_text(G.mons[i].rx, G.mons[i].ry - 0.5, b, cr ? 1 : 0.95, cr ? 0.81 : 0.95, cr ? 0.36 : 0.95);
       ab_burst(G.mons[i].rx, G.mons[i].ry, 5, 1, 0.8, 0.3, 3);
     }
+    if (any_hit) sfx_hit();
     ab_burst(G.p.x + G.p.fx * 0.8, G.p.y + G.p.fy * 0.8, 4, 1, 1, 1, 2.5);
   } else {
     if (!dmg) { bool cr; dmg = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5); }
@@ -1641,6 +1647,7 @@ void ab_update(double dt, unsigned keys) {
         if (!G.mons[j].active) continue;
         if (ab_dist(p->x, p->y, G.mons[j].x, G.mons[j].y) < 0.45) {
           G.mons[j].hp -= p->dmg;
+          sfx_hit();
           char b[16]; snprintf(b, sizeof b, "%d", p->dmg);
           ab_float_text(G.mons[j].x, G.mons[j].y - 0.5, b, 1, 0.85, 0.4);
           ab_burst(p->x, p->y, 4, p->r, p->g, p->b, 2.5);

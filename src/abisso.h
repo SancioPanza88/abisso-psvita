@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define ABISSO_VERSION "1.0.3"
+#define ABISSO_VERSION "1.0.4"
 #define ABISSO_TITLEID "ABSS00001"
 
 #define SCR_W 960
@@ -324,7 +324,8 @@ enum {
   K_UP = 1u << 0, K_DOWN = 1u << 1, K_LEFT = 1u << 2, K_RIGHT = 1u << 3,
   K_ATK = 1u << 4, K_INTER = 1u << 5, K_POT = 1u << 6, K_MANA = 1u << 7,
   K_ABIL = 1u << 8, K_MAP = 1u << 9, K_VIEW = 1u << 10, K_HELP = 1u << 11,
-  K_MUTE = 1u << 12, K_PAUSE = 1u << 13
+  K_MUTE = 1u << 12, K_PAUSE = 1u << 13,
+  K_ZIN = 1u << 14, K_ZOUT = 1u << 15
 };
 
 /* util */

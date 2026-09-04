@@ -37,6 +37,7 @@ set(SRC
   src/render.c
   src/audio.c
   src/input.c
+  src/net.c
 )
 
 add_executable(${PROJECT_NAME} ${SRC})
@@ -67,6 +68,11 @@ if(BUILD_VITA)
       target_link_libraries(${PROJECT_NAME} ${_found_${_lname}})
     endif()
   endforeach()
+  # rete LAN (socket BSD sopra sceNet)
+  target_link_libraries(${PROJECT_NAME} SceNet_stub SceSysmodule_stub)
+endif()
+if(WIN32)
+  target_link_libraries(${PROJECT_NAME} ws2_32)
 endif()
 
 if(BUILD_VITA)

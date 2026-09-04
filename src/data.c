@@ -138,10 +138,34 @@ void ab_rarity_color(int r, double *pr, double *pg, double *pb) {
 
 const char *EQUIP_SLOT_NAMES[5] = {"Elmo","Collana","Armatura","Anello","Gambali"};
 
+/* durata posa d'attacco per classe (CLASS_ATK_DUR web) */
+double ab_class_atk_dur(int id) {
+  static const double d[CLS_COUNT] = {
+    0.26, 0.15, 0.32, 0.20, 0.30, 0.32, 0.18, 0.14, 0.28
+  };
+  if (id < 0 || id >= CLS_COUNT) return 0.22;
+  return d[id];
+}
+
 const double BUFF_DURATION[BUFF_COUNT] = {12.0, 10.0, 12.0, 10.0};
 const char *BUFF_NAMES[BUFF_COUNT] = {"Furia","Scudo","Fretta","Concentrazione"};
 
-/* ---------- SPRITE_CROP 1:1 dalla web ---------- */
+/* chiavi entita -> file singolo (quelle su sheet sono in ENTSPR) */
+static const struct { const char *key, *file; } FILEMAP[] = {
+  {"orco","mon_orco"},{"spettro","mon_spettro"},{"drago","mon_drago"},
+  {"serpente","mon_serpente"},{"arpia","mon_arpia"},
+  {"cavaliere","mon_cavaliere"},{"cavaliere_alt","mon_cavaliere_alt"},
+  {"cultista","mon_cultista"},{"mantide","mon_mantide"},
+  {"golem","mon_golem"},{"sciamano","mon_sciamano"},
+  {"paladino","hero_paladino"},{"negromante","hero_negromante"},
+  {"bardo","hero_bardo"},{"monaco","hero_monaco"},
+  {NULL,NULL}
+};
+const char *ab_entity_file(const char *key) {
+  for (int i = 0; FILEMAP[i].key; i++)
+    if (strcmp(key, FILEMAP[i].key) == 0) return FILEMAP[i].file;
+  return key;
+}
 typedef struct { const char *key; int x, y, w, h; } CropDef;
 static const CropDef CROPS[] = {
   {"torch",516,132,401,480},

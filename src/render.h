@@ -5,6 +5,6 @@
 
 bool ren_init(void);
 void ren_quit(void);
-void ren_frame(unsigned keys);
+void ren_frame(unsigned keys, double dt);
 
 #endif

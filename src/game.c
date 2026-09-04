@@ -3,6 +3,7 @@
  */
 #include "abisso.h"
 #include "audio.h"
+#include "net.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -230,10 +231,14 @@ void ab_new_run(const char *name, int cls, const char *room) {
   if (room && room[0]) { strncpy(G.room, room, MAX_ROOM - 1); G.room[MAX_ROOM-1] = 0; }
   if (cls >= 0 && cls < CLS_COUNT) G.p.cls = cls;
   G.c64 = room_is_c64(G.room);
-  /* mondo fresco come bootstrapFreshWorld: seed casuale */
-  G.world_seed = ((uint32_t)rand() << 16) ^ (uint32_t)rand() ^ (uint32_t)(G.time * 1000 + 1);
-  if (G.world_seed == 0) G.world_seed = 0x12345678;
-  G.depth = 1;
+  /* mondo fresco come bootstrapFreshWorld: seed casuale (host: quello
+   * annunciato; joiner: quello ricevuto) */
+  if (net_role == NET_HOST && net_host_seed) G.world_seed = net_host_seed;
+  else if (net_role == NET_JOIN && net_join_seed) G.world_seed = net_join_seed;
+  else {
+    G.world_seed = ((uint32_t)rand() << 16) ^ (uint32_t)rand() ^ (uint32_t)(G.time * 1000 + 1);
+    if (G.world_seed == 0) G.world_seed = 0x12345678;
+  }
   G.state = ST_GAME;
   G.minimap = false; G.help = false; G.merchant_open = false;
   G.boss_active = false; G.boss_dead = false;
@@ -242,14 +247,15 @@ void ab_new_run(const char *name, int cls, const char *room) {
   G.p.gold = 0; G.p.potions = 1; G.p.mana_potions = 0;
   G.p.poison_t = 0; G.p.web_t = 0;
   G.p.dead = false; G.p.downed = false;
-  ab_gen_depth(1);
+  ab_gen_depth((net_role == NET_JOIN && net_join_depth > 1) ? net_join_depth : 1);
   const AbClassDef *c = ab_class_def(G.p.cls);
   char b[96];
   snprintf(b, sizeof b, "Benvenuto, %s %s! Stanza '%s'", c->name, G.p.name, G.room);
   ab_add_log(b);
   ab_toast(G.c64 ? "MODALITA' C64!" : "L'abisso ti attende...");
   if (G.c64) ab_add_log("Easter egg C64 attivo.");
-  ab_add_log("OFFLINE Vita: single-player, mondo fresco casuale.");
+  if (net_role == NET_OFF) ab_add_log("OFFLINE Vita: single-player, mondo fresco casuale.");
+  else ab_add_log(net_role == NET_HOST ? "Partita LAN: tu sei l'host." : "Partita LAN: ti sei unito.");
 }
 
 /* ---------------- dungeon 1:1 ---------------- */
@@ -599,8 +605,7 @@ void ab_gen_depth(int depth) {
     mm->active = true;
     mm->type = tk;
     mm->x = mm->rx = mon_spots[i][0] + 0.5;
-    mm->y = mm->ry = mon_spots[i][1] + 0.5;
-    mm->max_hp = mm->hp = ab_scaled_stat(td->hp, depth, 0.16);
+    mm->y = mm->ry = mon_spots[i][1] + 0.5;    mm->max_hp = mm->hp = ab_scaled_stat(td->hp, depth, 0.16);
     mm->dmg = ab_scaled_stat(td->dmg, depth, 0.11);
     mm->speed = td->speed;
     mm->aggro = td->aggro;
@@ -613,6 +618,8 @@ void ab_gen_depth(int depth) {
     mm->spec_cd = 0; mm->breath_cd = 0; mm->fb_cd = 0; mm->fly_cd = 0;
     mm->fly_t = 0; mm->dive_t = 0; mm->summon_left = 0; mm->flying = false;
     mm->fx_mode = 0; mm->fx_t = 0; mm->fx_dur = 0; mm->fx_hit = false; mm->dent_t = 0;
+    mm->atk_anim = 0; mm->atk_dur = (tk == 'o') ? 0.5 : 0.3;
+    mm->phase = ((mi * 37) % 100) / 100.0;
   }
   /* boss */
   G.boss_active = false; G.boss_dead = false;
@@ -632,6 +639,7 @@ void ab_gen_depth(int depth) {
       mm->is_boss = true;
       mm->affix = 0;
       mm->atk_cd = 0;
+      mm->atk_anim = 0; mm->atk_dur = 0.3; mm->phase = 0.5;
       mm->spec_cd = 2.5; mm->breath_cd = 2.0; mm->fb_cd = 3.0; mm->fly_cd = 8.5;
       mm->fly_t = 0; mm->dive_t = 0; mm->flying = false;
       mm->summon_left = td->summon ? td->summon_n : 0;
@@ -860,9 +868,24 @@ void ab_drink_mana(void) {
 
 void ab_try_interact(void) {
   if (G.p.dead || G.p.downed) return;
+  bool joined = (net_role == NET_JOIN && net_connected);
   int px = (int)floor(G.p.x), py = (int)floor(G.p.y);
   if (px >= 0 && py >= 0 && px < G.map.w && py < G.map.h &&
-      G.map.tiles[py][px] == T_STAIRS) { ab_descend(); return; }
+      G.map.tiles[py][px] == T_STAIRS) {
+    if (joined) { net_send_stairs(); ab_toast("Segnalato all'host..."); }
+    else ab_descend();
+    return;
+  }
+  /* rianima il compagno caduto (come la web) */
+  if (net_connected && net_peer.active && net_peer.downed && !net_peer.dead) {
+    double dx = G.p.x - net_peer.x, dy = G.p.y - net_peer.y;
+    if (dx * dx + dy * dy < 2.1 * 2.1) {
+      net_send_revive();
+      sfx_revive();
+      ab_add_log("Hai rianimato il compagno!");
+      return;
+    }
+  }
   double mdx = G.p.x - (G.map.merch_x + 0.5), mdy = G.p.y - (G.map.merch_y + 0.5);
   if (mdx * mdx + mdy * mdy < 2.1 * 2.1) {
     if (!G.merchant_open) G.merchant_open = true;
@@ -873,8 +896,10 @@ void ab_try_interact(void) {
     if (!c->active || c->open) continue;
     double dx = G.p.x - (c->tx + 0.5), dy = G.p.y - (c->ty + 0.5);
     if (dx * dx + dy * dy > 2.1 * 2.1) continue;
+    if (joined) { net_send_open(i); return; }
     if (c->boss_chest && !G.boss_dead) { ab_toast("Sigillato: uccidi il boss!"); return; }
     c->open = true;
+    sfx_chest();
     ab_burst(c->tx + 0.5, c->ty + 0.5, 12, 1, 0.85, 0.3, 3.5);
     AbRng r; ab_rng_seed(&r, (uint32_t)(G.time * 131 + i * 17 + G.depth));
     if (c->boss_chest) {
@@ -908,7 +933,9 @@ void ab_try_interact(void) {
 void ab_descend(void) {
   int nd = G.depth + 1;
   ab_add_log("Scendi piu' a fondo...");
+  sfx_stair();
   ab_gen_depth(nd);
+  if (net_role == NET_HOST && net_connected) net_send_depth(nd);
   char b[64];
   snprintf(b, sizeof b, "Piano %d", nd);
   ab_toast(b);
@@ -948,22 +975,25 @@ static AbMonster *nearest_mon(double range, bool use_rx) {
   return best;
 }
 
-static void spawn_proj(double x, double y, double dx, double dy, double spd, double range, int dmg, bool friendly, double r, double g, double b, double hit_r, bool poison, bool web) {
+static void spawn_proj(double x, double y, double dx, double dy, double spd, double range, int dmg, bool friendly, double r, double g, double b, double hit_r, bool poison, bool web, double life, bool pierce) {
   for (int i = 0; i < MAX_PROJS; i++) {
     if (G.projs[i].active) continue;
     AbProj *p = &G.projs[i];
+    static unsigned seq = 1;
     p->active = true;
     p->x = x; p->y = y;
     double l = sqrt(dx*dx + dy*dy);
     if (l < 0.001) { dx = 0; dy = 1; l = 1; }
     p->vx = dx / l * spd; p->vy = dy / l * spd;
-    p->life = 4.0; p->range_left = range;
+    p->life = life; p->range_left = range;
     p->dmg = dmg;
     p->friendly = friendly;
-    p->poison = poison; p->web = web;
+    p->poison = poison; p->web = web; p->pierce = pierce;
     p->hit_r = hit_r > 0 ? hit_r : 0.45;
     p->r = r; p->g = g; p->b = b;
     p->size = 0.09;
+    p->id_mark = seq++;
+    if (seq == 0) seq = 1;
     return;
   }
 }
@@ -975,6 +1005,7 @@ static void hurt_player(int dmg, bool poison) {
   if (G.p.downed) {
     G.p.dead = true;
     G.state = ST_DEAD;
+    sfx_death();
     ab_add_log("Colpito a terra: morte.");
     G.p.gold = 0; G.p.potions = 0; G.p.mana_potions = 0;
     memset(G.p.equip, 0, sizeof G.p.equip);
@@ -1015,12 +1046,16 @@ static void kill_monster(int i) {
   char b[24]; snprintf(b, sizeof b, "+%d", gold);
   ab_float_text(m->x, m->y - 0.5, b, 1, 0.85, 0.3);
   ab_burst(m->x, m->y, m->is_boss ? 30 : 10, 1, 0.5, 0.2, 4);
+  ab_burst(m->x, m->y, 13, 0.5, 0.4, 0.3, 3);
   if (m->affix == 2) {
+    sfx_boom();
     for (int k = 0; k < MAX_MONSTERS; k++) {
       if (k != i && G.mons[k].active && ab_dist(m->x, m->y, G.mons[k].x, G.mons[k].y) < 1.8)
         G.mons[k].hp -= 6;
     }
     if (ab_dist(m->x, m->y, G.p.x, G.p.y) < 1.8) hurt_player(5, false);
+    if (peer_targetable() && ab_dist(m->x, m->y, net_peer.x, net_peer.y) < 1.8)
+      net_send_hurt_to_peer(5, false, false);
     ab_burst(m->x, m->y, 16, 1, 0.4, 0.1, 6);
     G.shake = 0.35;
   }
@@ -1038,6 +1073,8 @@ static void kill_monster(int i) {
         G.mons[j].speed = jd->speed; G.mons[j].aggro = jd->aggro;
         G.mons[j].is_boss = false; G.mons[j].affix = 0;
         G.mons[j].atk_cd = 0; G.mons[j].fx_mode = 0; G.mons[j].dent_t = 0;
+        G.mons[j].atk_anim = 0; G.mons[j].atk_dur = 0.3;
+        G.mons[j].phase = ((j * 37) % 100) / 100.0;
         break;
       }
     }
@@ -1046,11 +1083,14 @@ static void kill_monster(int i) {
     G.boss_dead = true;
     G.boss_active = false;
     G.map.gates_closed = false;
+    sfx_bossKill();
     ab_toast("BOSS SCONFITTO!");
     ab_add_log("Il boss cade. La tana si apre.");
     ab_burst(m->x, m->y, 40, 1, 0.9, 0.4, 6);
     G.shake = 0.5;
     if (G.depth > G.best_depth) { G.best_depth = G.depth; ab_save_record(); }
+  } else {
+    sfx_kill();
   }
   m->active = false;
 }
@@ -1066,7 +1106,10 @@ void ab_player_attack(void) {
   G.p.atk_cd = c->atk_cooldown * (G.p.buffs[BUFF_FOCUS] > 0 ? 0.5 : 1.0);
   G.p.anim_t = 0.22;
   if (c->max_mp > 0 && c->mana_cost) { G.p.mp -= c->mana_cost; if (G.p.mp < 0) G.p.mp = 0; }
-  sfx_attack();
+  if (!c->ranged) sfx_swing();
+  else if (G.p.cls == CLS_MAGO || G.p.cls == CLS_NEGROMANTE) sfx_shootMage();
+  else if (G.p.cls == CLS_PROF) sfx_shootPlasma();
+  else sfx_shootRanger();
   double ar = c->ranged ? c->range : (c->range + 0.7 > 2.1 ? c->range + 0.7 : 2.1);
   AbMonster *nm = nearest_mon(ar, true);
   if (nm) {
@@ -1075,14 +1118,8 @@ void ab_player_attack(void) {
     if (l > 0.01) { G.p.fx = dx / l; G.p.fy = dy / l; }
   }
   double rage = G.p.buffs[BUFF_RAGE] > 0 ? 1.4 : 1.0;
-  int dmg = 0;
-  if (G.p.cls == CLS_PROF && G.p.charge_t >= 0.8) {
-    bool cr; dmg = (int)(roll_amount(CLS_PROF, &cr) * 2 * rage + 0.5);
-    G.p.charge_t = 0;
-    ab_burst(G.p.x, G.p.y, 10, 0.5, 1, 1, 4);
-  }
   if (!c->ranged) {
-    bool any_hit = false;
+    bool joined = (net_role == NET_JOIN && net_connected);
     for (int i = 0; i < MAX_MONSTERS; i++) {
       if (!G.mons[i].active) continue;
       double dx = G.mons[i].rx - G.p.x, dy = G.mons[i].ry - G.p.y;
@@ -1093,103 +1130,225 @@ void ab_player_attack(void) {
       if (dot < cos(c->arc)) continue;
       bool cr = false;
       int amount = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5);
-      G.mons[i].hp -= amount;
-      any_hit = true;
+      if (joined) net_send_hit(i, amount);
+      else G.mons[i].hp -= amount;
       G.mons[i].facing_x = -G.p.fx; G.mons[i].facing_y = -G.p.fy;
       char b[16]; snprintf(b, sizeof b, cr ? "%d!" : "%d", amount);
       ab_float_text(G.mons[i].rx, G.mons[i].ry - 0.5, b, cr ? 1 : 0.95, cr ? 0.81 : 0.95, cr ? 0.36 : 0.95);
-      ab_burst(G.mons[i].rx, G.mons[i].ry, 5, 1, 0.8, 0.3, 3);
+      if (cr) { sfx_crit(); G.shake = 0.32; ab_crit_flash(); }
+      else sfx_hit();
+      ab_burst(G.mons[i].rx, G.mons[i].ry, 6, 1, 0.8, 0.3, 3);
     }
-    if (any_hit) sfx_hit();
     ab_burst(G.p.x + G.p.fx * 0.8, G.p.y + G.p.fy * 0.8, 4, 1, 1, 1, 2.5);
   } else {
-    if (!dmg) { bool cr; dmg = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5); }
-    double cr = 0.55, cg = 0.85, cb = 1.0;
-    if (G.p.cls == CLS_NEGROMANTE) { cr = 0.56; cg = 0.88; cb = 0.48; }
-    else if (G.p.cls == CLS_RANGER) { cr = 0.85; cg = 0.9; cb = 0.69; }
-    else if (G.p.cls == CLS_PROF) { cr = 0.49; cg = 0.98; cb = 1.0; }
-    spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, c->proj_speed, c->range, dmg, true, cr, cg, cb, 0.45, false, false);
-    ab_burst(G.p.x + G.p.fx * 0.5, G.p.y + G.p.fy * 0.5, 3, cr, cg, cb, 2);
+    bool cr = false;
+    int dmg = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5);
+    if (cr) { sfx_crit(); G.shake = 0.32; ab_crit_flash(); }
+    double pr = 0.55, pg = 0.85, pb = 1.0;
+    if (G.p.cls == CLS_NEGROMANTE) { pr = 0.56; pg = 0.88; pb = 0.48; }
+    else if (G.p.cls == CLS_RANGER) { pr = 0.85; pg = 0.9; pb = 0.69; }
+    else if (G.p.cls == CLS_PROF) { pr = 0.49; pg = 0.98; pb = 1.0; }
+    spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, c->proj_speed, c->range, dmg, true, pr, pg, pb, 0.45, false, false, 1.6, false);
+    ab_burst(G.p.x + G.p.fx * 0.5, G.p.y + G.p.fy * 0.5, 8, pr, pg, pb, 2.5);
   }
 }
 
 void ab_use_ability(void) {
   if (G.p.dead || G.p.downed) return;
-  if (G.p.ability_cd > 0) return;
   const AbClassDef *c = ab_class_def(G.p.cls);
+  if (G.p.ability_cd > 0) {
+    char b[64];
+    snprintf(b, sizeof b, "Abilita in recupero (%.0fs)", G.p.ability_cd + 0.99);
+    ab_toast(b);
+    return;
+  }
   if (c->ability_mana > 0 && G.p.mp < c->ability_mana) {
-    ab_float_text(G.p.x, G.p.y - 0.6, "NO MANA", 0.4, 0.6, 1.0);
+    ab_toast("Mana insufficiente");
     return;
   }
   G.p.ability_cd = c->ability_cd;
   if (c->ability_mana) { G.p.mp -= c->ability_mana; if (G.p.mp < 0) G.p.mp = 0; }
+  sfx_ability();
   bool cr = false;
   double rage = G.p.buffs[BUFF_RAGE] > 0 ? 1.4 : 1.0;
   int dmg = (int)(roll_amount(G.p.cls, &cr) * rage + 0.5);
   switch (G.p.cls) {
-    case CLS_GUERRIERO: {
-      double nx = G.p.x + G.p.fx * 3.0, ny = G.p.y + G.p.fy * 3.0;
-      if (ab_is_walkable((int)nx, (int)ny)) { G.p.x = nx; G.p.y = ny; }
-      for (int i = 0; i < MAX_MONSTERS; i++) {
-        if (!G.mons[i].active) continue;
-        if (ab_dist(G.p.x, G.p.y, G.mons[i].x, G.mons[i].y) < 2.2) {
-          G.mons[i].hp -= dmg + 2;
-          ab_float_text(G.mons[i].x, G.mons[i].y - 0.5, "CARICA!", 1, 0.8, 0.3);
+    case CLS_GUERRIERO: { /* Carica: 4.5 in 18 passi, danno x1.3 */
+      double ox = G.p.x, oy = G.p.y;
+      int hits = 0;
+      bool done[MAX_MONSTERS] = {false};
+      for (int s = 1; s <= 18; s++) {
+        double nx = ox + G.p.fx * 4.5 * s / 18.0;
+        double ny = oy + G.p.fy * 4.5 * s / 18.0;
+        if (!ab_is_walkable((int)nx, (int)ny)) break;
+        G.p.x = nx; G.p.y = ny;
+        if (s % 4 == 0) ab_burst(nx, ny + 0.3, 2, 0.54, 0.48, 0.36, 0.6);
+        for (int i = 0; i < MAX_MONSTERS; i++) {
+          if (!G.mons[i].active || done[i]) continue;
+          if (ab_dist(nx, ny, G.mons[i].rx, G.mons[i].ry) < 0.7) {
+            done[i] = true;
+            bool c2 = false;
+            int a = (int)(roll_amount(G.p.cls, &c2) * 1.3 * rage + 0.5);
+            G.mons[i].hp -= a;
+            char b[16]; snprintf(b, sizeof b, "%d", a);
+            ab_float_text(G.mons[i].rx, G.mons[i].ry - 0.5, b, 1, 0.81, 0.36);
+            ab_burst(G.mons[i].rx, G.mons[i].ry, 6, 0.86, 0.86, 0.88, 3);
+            sfx_hit();
+            hits++;
+          }
         }
       }
-      ab_burst(G.p.x, G.p.y, 12, 1, 0.8, 0.3, 4);
-      G.shake = 0.25;
-      break;
-    }
-    case CLS_LADRO: {
-      AbMonster *nmm = nearest_mon(9, true);
-      if (nmm) {
-        G.p.x = nmm->x - G.p.fx * 0.8; G.p.y = nmm->y - G.p.fy * 0.8;
-        nmm->hp -= (int)(dmg * 1.8 + 0.5);
-        ab_float_text(nmm->x, nmm->y - 0.5, "FURTIVO!", 0.8, 0.9, 1);
+      G.p.iframes = G.p.iframes > 0.35 ? G.p.iframes : 0.35;
+      G.shake = 0.28;
+      ab_burst(G.p.x, G.p.y, 10, 0.86, 0.86, 0.88, 3);
+      ab_float_text(G.p.x, G.p.y - 0.8, "CARICA!", 0.86, 0.86, 0.88);
+      {
+        char l[64];
+        snprintf(l, sizeof l, "Carica: travolti %d nemici.", hits);
+        ab_add_log(l);
       }
-      G.p.iframes = 1.2;
       break;
     }
-    case CLS_MAGO: case CLS_NEGROMANTE: {
+    case CLS_LADRO: { /* Passo Furtivo: raggio 6, danno medio x1.9 */
+      AbMonster *tgt = NULL;
+      double bd = 36.0;
+      for (int i = 0; i < MAX_MONSTERS; i++) {
+        if (!G.mons[i].active) continue;
+        double dx = G.mons[i].rx - G.p.x, dy = G.mons[i].ry - G.p.y;
+        double d2 = dx * dx + dy * dy;
+        if (d2 < 36.0 && d2 < bd) { bd = d2; tgt = &G.mons[i]; }
+      }
+      double ox = G.p.x, oy = G.p.y;
+      if (tgt) {
+        double dx = tgt->rx - G.p.x, dy = tgt->ry - G.p.y;
+        double d = sqrt(bd);
+        if (d < 0.01) d = 1;
+        double sx = tgt->rx - dx / d * 0.85, sy = tgt->ry - dy / d * 0.85;
+        if (ab_is_walkable((int)sx, (int)sy)) { G.p.x = sx; G.p.y = sy; }
+        G.p.fx = dx / d; G.p.fy = dy / d;
+        int a = (int)(((c->dmg_min + c->dmg_max) / 2.0) * 1.9 + 0.5);
+        tgt->hp -= a;
+        char b[16]; snprintf(b, sizeof b, "%d!", a);
+        ab_float_text(tgt->rx, tgt->ry - 0.5, b, 1, 0.81, 0.36);
+        ab_burst(tgt->rx, tgt->ry, 8, 1, 0.88, 0.54, 4);
+        sfx_crit();
+        ab_crit_flash();
+        G.shake = 0.24;
+        ab_add_log("Passo furtivo: critico garantito!");
+      } else {
+        double nx = G.p.x + G.p.fx * 2, ny = G.p.y + G.p.fy * 2;
+        if (ab_is_walkable((int)nx, (int)ny)) { G.p.x = nx; G.p.y = ny; }
+        ab_add_log("Nessun bersaglio: solo uno scatto.");
+      }
+      G.p.iframes = 1.4;
+      ab_burst(ox, oy, 10, 0.29, 0.23, 0.48, 2);
+      ab_burst(G.p.x, G.p.y, 10, 0.54, 0.36, 1.0, 2);
+      ab_float_text(G.p.x, G.p.y - 0.8, "PASSO FURTIVO", 0.85, 0.9, 1.0);
+      break;
+    }
+    case CLS_MAGO: { /* Onda d'Urto: raggio 2.3, x1.2 */
       int hits = 0;
       for (int i = 0; i < MAX_MONSTERS; i++) {
         if (!G.mons[i].active) continue;
-        if (ab_dist(G.p.x, G.p.y, G.mons[i].x, G.mons[i].y) < 2.6) {
-          G.mons[i].hp -= dmg;
+        if (ab_dist(G.p.x, G.p.y, G.mons[i].rx, G.mons[i].ry) < 2.3) {
+          bool c2 = false;
+          int a = (int)(roll_amount(G.p.cls, &c2) * 1.2 * rage + 0.5);
+          G.mons[i].hp -= a;
+          char b[16]; snprintf(b, sizeof b, "%d", a);
+          ab_float_text(G.mons[i].rx, G.mons[i].ry - 0.5, b, 0.56, 0.82, 1.0);
+          ab_burst(G.mons[i].rx, G.mons[i].ry, 6, 0.56, 0.82, 1.0, 3);
+          sfx_hit();
           hits++;
-          if (G.p.cls == CLS_NEGROMANTE) { G.p.hp += dmg / 2; if (G.p.hp > G.p.max_hp) G.p.hp = G.p.max_hp; }
         }
       }
-      ab_burst(G.p.x, G.p.y, 20, 0.6, 0.8, 1, 5);
-      G.shake = 0.3;
-      if (hits == 0) ab_float_text(G.p.x, G.p.y - 0.6, "VUOTO", 0.6, 0.6, 0.6);
+      ab_burst(G.p.x, G.p.y, 22, 0.56, 0.82, 1.0, 4);
+      ab_shock(G.p.x, G.p.y, 0.56, 0.82, 1.0);
+      sfx_boom();
+      G.shake = 0.55;
+      ab_float_text(G.p.x, G.p.y - 0.8, "ONDA D'URTO", 0.56, 0.82, 1.0);
+      {
+        char l[64];
+        snprintf(l, sizeof l, "Onda d'urto: colpiti %d nemici.", hits);
+        ab_add_log(l);
+      }
       break;
     }
-    case CLS_RANGER: {
-      for (int k = -2; k <= 2; k++) {
-        double a = atan2(G.p.fy, G.p.fx) + k * 0.18;
-        spawn_proj(G.p.x, G.p.y, cos(a), sin(a), 15, 9, dmg, true, 0.85, 0.9, 0.69, 0.45, false, false);
+    case CLS_NEGROMANTE: { /* Drenaggio: raggio 2.4, x1.2, cura meta drenato */
+      int hits = 0, drained = 0;
+      for (int i = 0; i < MAX_MONSTERS; i++) {
+        if (!G.mons[i].active) continue;
+        if (ab_dist(G.p.x, G.p.y, G.mons[i].rx, G.mons[i].ry) < 2.4) {
+          bool c2 = false;
+          int a = (int)(roll_amount(G.p.cls, &c2) * 1.2 * rage + 0.5);
+          G.mons[i].hp -= a;
+          char b[16]; snprintf(b, sizeof b, "%d", a);
+          ab_float_text(G.mons[i].rx, G.mons[i].ry - 0.5, b, 0.56, 0.88, 0.48);
+          ab_burst(G.mons[i].rx, G.mons[i].ry, 6, 0.56, 0.88, 0.48, 3);
+          sfx_hit();
+          hits++; drained += a;
+        }
       }
+      if (drained > 0) {
+        int heal = drained / 2;
+        if (heal < 1) heal = 1;
+        G.p.hp += heal;
+        if (G.p.hp > G.p.max_hp) G.p.hp = G.p.max_hp;
+        char b[32]; snprintf(b, sizeof b, "+%d", heal);
+        ab_float_text(G.p.x, G.p.y - 0.7, b, 0.56, 0.88, 0.48);
+        ab_burst(G.p.x, G.p.y - 0.3, 10, 0.56, 0.88, 0.48, 2);
+      }
+      ab_burst(G.p.x, G.p.y, 18, 0.56, 1.0, 0.84, 4);
+      ab_shock(G.p.x, G.p.y, 0.56, 0.88, 0.48);
+      sfx_boom();
+      G.shake = 0.5;
+      ab_float_text(G.p.x, G.p.y - 0.8, "DRENAGGIO", 0.56, 0.88, 0.48);
+      {
+        char l[96];
+        snprintf(l, sizeof l, "Drenaggio: %d nemici, %d danni.", hits, drained);
+        ab_add_log(l);
+      }
+      break;
+    }
+    case CLS_RANGER: { /* Raffica: 5 frecce, danno x0.7 */
+      double base = atan2(G.p.fy, G.p.fx);
+      const double off[5] = {-0.42, -0.21, 0, 0.21, 0.42};
+      for (int k = 0; k < 5; k++) {
+        double a = base + off[k];
+        int admg = (int)(dmg * 0.7 + 0.5);
+        spawn_proj(G.p.x, G.p.y, cos(a), sin(a), 15, 9, admg, true, 0.85, 0.9, 0.69, 0.45, false, false, 1.6, false);
+      }
+      sfx_shootRanger();
+      ab_burst(G.p.x, G.p.y, 8, 0.85, 0.9, 0.69, 3);
+      ab_float_text(G.p.x, G.p.y - 0.8, "RAFFICA!", 0.85, 0.9, 0.69);
       break;
     }
     case CLS_PALADINO:
       G.p.buffs[BUFF_SHIELD] = 5.0;
-      ab_add_log("Muro Sacro: -50% danno per 5s.");
+      ab_burst(G.p.x, G.p.y, 10, 1, 0.85, 0.54, 3);
+      ab_float_text(G.p.x, G.p.y - 0.8, "MURO SACRO", 1, 0.85, 0.54);
+      ab_add_log("Muro Sacro: danno dimezzato per 5s.");
       break;
     case CLS_BARDO:
       G.p.buffs[BUFF_RAGE] = 8.0;
+      ab_burst(G.p.x, G.p.y - 0.3, 10, 1, 0.81, 0.36, 2);
+      ab_float_text(G.p.x, G.p.y - 0.8, "CANTO", 1, 0.81, 0.36);
       ab_add_log("Canto: +40% danno per 8s.");
       break;
-    case CLS_MONACO: {
-      for (int k = 0; k < 3; k++)
-        spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, 9 + k * 2, 7, dmg, true, 1, 0.8, 0.5, 0.45, false, false);
+    case CLS_MONACO: { /* Onda di Chi: un proiettile perforante x1.5 */
+      int wdmg = (int)(dmg * 1.5 + 0.5);
+      spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, 13, 12, wdmg, true, 1, 0.79, 0.48, 0.45, false, false, 0.9, true);
+      sfx_shootPlasma();
+      G.shake = 0.18;
+      ab_burst(G.p.x, G.p.y, 8, 1, 0.79, 0.48, 3);
+      ab_float_text(G.p.x, G.p.y - 0.8, "ONDA DI CHI", 1, 0.79, 0.48);
       break;
     }
-    case CLS_PROF:
-      G.p.charge_t = 0.0001;
-      ab_add_log("Carica plasma... attacca per sparare!");
-      G.p.ability_cd = 4.0;
+    case CLS_PROF: /* Colpo Caricato: parte il conto alla rovescia, poi spara da solo */
+      G.p.charge_t = 0.8;
+      sfx_shootPlasma();
+      ab_float_text(G.p.x, G.p.y - 0.9, "CARICA...", 0.49, 0.98, 1.0);
+      ab_burst(G.p.x, G.p.y - 0.2, 6, 0.49, 1.0, 1.0, 1.5);
+      ab_add_log("Carica plasma in corso...");
       break;
   }
 }
@@ -1216,6 +1375,8 @@ static void summon_minions(AbMonster *m) {
       G.mons[j].speed = jd->speed; G.mons[j].aggro = 99;
       G.mons[j].is_boss = false; G.mons[j].affix = 0; G.mons[j].atk_cd = 0;
       G.mons[j].fx_mode = 0; G.mons[j].dent_t = 0;
+      G.mons[j].atk_anim = 0; G.mons[j].atk_dur = 0.3;
+      G.mons[j].phase = ((j * 37) % 100) / 100.0;
       m->summon_left--;
       break;
     }
@@ -1247,9 +1408,22 @@ void ab_update(double dt, unsigned keys) {
 
   for (int i = 0; i < BUFF_COUNT; i++)
     if (G.p.buffs[i] > 0) G.p.buffs[i] -= dt;
-  if (G.p.charge_t > 0 && G.p.charge_t < 0.8) {
-    G.p.charge_t += dt;
-    if (G.p.charge_t >= 0.8) ab_float_text(G.p.x, G.p.y - 0.6, "CARICO!", 0.5, 1, 1);
+  /* Colpo Caricato: conto alla rovescia poi spara da solo */
+  if (G.p.charge_t > 0 && !G.p.dead && !G.p.downed) {
+    G.p.charge_t -= dt;
+    if (G.p.charge_t <= 0) {
+      G.p.charge_t = 0;
+      const AbClassDef *cc2 = ab_class_def(CLS_PROF);
+      bool ccr = false;
+      double rage2 = G.p.buffs[BUFF_RAGE] > 0 ? 1.4 : 1.0;
+      int cdm = (int)(roll_amount(CLS_PROF, &ccr) * 2.0 * rage2 + 0.5);
+      spawn_proj(G.p.x, G.p.y, G.p.fx, G.p.fy, cc2->proj_speed * 1.35, cc2->range,
+        cdm, true, 0.74, 0.95, 1.0, 0.5, false, false, 2.4, false);
+      sfx_shootPlasma();
+      G.shake = 0.4;
+      ab_burst(G.p.x + G.p.fx * 0.6, G.p.y + G.p.fy * 0.6, 14, 0.49, 1.0, 1.0, 3);
+      ab_burst(G.p.x, G.p.y, 10, 0.5, 1, 1, 4);
+    }
   }
   if (G.p.poison_t > 0) {
     G.p.poison_t -= dt;
@@ -1282,13 +1456,14 @@ void ab_update(double dt, unsigned keys) {
       try_move(&G.p.x, &G.p.y, dx * spd * dt, dy * spd * dt);
       if (((int)(G.time * 8)) != ((int)((G.time - dt) * 8)))
         ab_burst(G.p.x, G.p.y + 0.3, 1, 0.4, 0.35, 0.3, 0.8);
+      {
+        static double step_acc = 0;
+        step_acc += dt;
+        if (step_acc > 0.26) { step_acc = 0; sfx_step(); }
+      }
     }
     if (keys & K_ATK) {
-      if (G.p.cls == CLS_PROF && G.p.charge_t > 0) {
-        if (G.p.charge_t >= 0.8) ab_player_attack();
-      } else ab_player_attack();
-    } else {
-      if (G.p.cls == CLS_PROF && G.p.charge_t >= 0.8) ab_player_attack();
+      ab_player_attack();
     }
   }
   if (G.p.atk_cd > 0) G.p.atk_cd -= dt;
@@ -1301,6 +1476,7 @@ void ab_update(double dt, unsigned keys) {
       G.p.downed = false;
       G.p.dead = true;
       G.state = ST_DEAD;
+      sfx_death();
       G.p.gold = 0; G.p.potions = 0; G.p.mana_potions = 0;
       memset(G.p.equip, 0, sizeof G.p.equip);
       if (G.depth > G.best_depth) G.best_depth = G.depth;
@@ -1319,8 +1495,9 @@ void ab_update(double dt, unsigned keys) {
     ab_update_fov();
   }
 
-  /* trigger boss */
-  if (G.map.has_arena && !G.boss_active && !G.boss_dead) {
+  /* trigger boss: solo host/solo (il joiner lo riceve) */
+  if (G.map.has_arena && !G.boss_active && !G.boss_dead &&
+      (net_role != NET_JOIN || !net_connected)) {
     AbMonster *boss = NULL;
     for (int i = 0; i < MAX_MONSTERS; i++)
       if (G.mons[i].active && G.mons[i].is_boss) { boss = &G.mons[i]; break; }
@@ -1329,6 +1506,7 @@ void ab_update(double dt, unsigned keys) {
       if (fabs(dx) < G.map.arena_w / 2.0 && fabs(dy) < G.map.arena_h / 2.0) {
         G.boss_active = true;
         G.map.gates_closed = true;
+        sfx_bossRoar();
         char b[96];
         snprintf(b, sizeof b, "%s si risveglia!", G.boss_name);
         ab_toast(b);
@@ -1345,10 +1523,16 @@ void ab_update(double dt, unsigned keys) {
     }
   }
 
-  /* mostri */
+  /* mostri: il joiner li riceve dall'host, non li simula */
+  bool joined_sim = (net_role == NET_JOIN && net_connected);
   for (int i = 0; i < MAX_MONSTERS; i++) {
     AbMonster *m = &G.mons[i];
     if (!m->active) continue;
+    if (joined_sim) {
+      m->rx += (m->x - m->rx) * fmin(1, dt * 8);
+      m->ry += (m->y - m->ry) * fmin(1, dt * 8);
+      continue;
+    }
     if (m->hp <= 0) { kill_monster(i); continue; }
     const AbMonDef *td = ab_mon_def(m->type);
     if (!td) { m->active = false; continue; }
@@ -1366,6 +1550,7 @@ void ab_update(double dt, unsigned keys) {
       continue;
     }
     if (m->atk_cd > 0) m->atk_cd -= dt;
+    if (m->atk_anim > 0) m->atk_anim -= dt;
     if (m->affix == 3) {
       m->regen_acc += m->max_hp * 0.045 * dt;
       if (m->regen_acc >= 1) { int h = (int)m->regen_acc; m->regen_acc -= h; m->hp += h; if (m->hp > m->max_hp) m->hp = m->max_hp; }
@@ -1384,6 +1569,14 @@ void ab_update(double dt, unsigned keys) {
       }
       double pdx = G.p.x - m->x, pdy = G.p.y - m->y;
       double pdd = sqrt(pdx*pdx + pdy*pdy);
+      bool tgt_peer = false;
+      if (peer_targetable()) {
+        double qx = net_peer.x - m->x, qy = net_peer.y - m->y;
+        if (qx*qx + qy*qy < pdx*pdx + pdy*pdy) {
+          tgt_peer = true; pdx = qx; pdy = qy;
+          pdd = sqrt(pdx*pdx + pdy*pdy);
+        }
+      }
       if (pdd > 0.05) { m->facing_x = pdx / pdd; m->facing_y = pdy / pdd; }
       /* volo drago */
       if (m->type == 'D') {
@@ -1407,13 +1600,16 @@ void ab_update(double dt, unsigned keys) {
         if (m->dive_t > 0) {
           m->dive_t -= dt;
           if (m->dive_t <= 0) {
-            if (ab_dist(G.p.x, G.p.y, m->dive_x, m->dive_y) < 2.0) hurt_player(17, false);
+            double hx = tgt_peer ? net_peer.x : G.p.x;
+            double hy = tgt_peer ? net_peer.y : G.p.y;
+            if (ab_dist(hx, hy, m->dive_x, m->dive_y) < 2.0) damage_hero(tgt_peer, 17, false, false);
             ab_burst(m->dive_x, m->dive_y, 20, 1, 0.5, 0.2, 5);
             G.shake = 0.5;
             m->spec_cd = 2.0;
           }
         } else if (m->spec_cd <= 0) {
-          m->dive_x = G.p.x; m->dive_y = G.p.y;
+          m->dive_x = tgt_peer ? net_peer.x : G.p.x;
+          m->dive_y = tgt_peer ? net_peer.y : G.p.y;
           m->dive_t = 1.3;
           m->spec_cd = 6.0;
           ab_add_log("Il Drago punta la preda!");
@@ -1429,7 +1625,7 @@ void ab_update(double dt, unsigned keys) {
           double ang = atan2(pdy, pdx);
           for (int k = -2; k <= 2; k++) {
             double a = ang + k * 0.22;
-            spawn_proj(m->x, m->y, cos(a), sin(a), 7, bdist, 10, false, 1, 0.5, 0.1, 0.5, true, false);
+            spawn_proj(m->x, m->y, cos(a), sin(a), 7, bdist, 10, false, 1, 0.5, 0.1, 0.5, true, false, 4.0, false);
           }
           G.shake = 0.4;
           ab_add_log(m->type == 'D' ? "Soffio di fuoco!" : "Soffio pestilenziale!");
@@ -1448,7 +1644,8 @@ void ab_update(double dt, unsigned keys) {
         else if (m->type == 'R') { fspd = 3.2; fr = 2.0; fdmg = 11; fcr = 0.88; fcg = 0.85; fcb = 0.80; fpois = true; fweb = true; }
         else if (m->type == 'K') { fspd = 3.0; fr = 1.5; fdmg = 9; fcr = 0.79; fcg = 0.66; fcb = 0.39; }
         m->fb_cd = 6.4;
-        spawn_proj(m->x, m->y, pdx, pdy, fspd, 10, fdmg / 2 + 4, false, fcr, fcg, fcb, fr, fpois, fweb);
+        m->atk_anim = 0.4;
+        spawn_proj(m->x, m->y, pdx, pdy, fspd, 10, fdmg / 2 + 4, false, fcr, fcg, fcb, fr, fpois, fweb, 4.0, false);
         ab_burst(m->x, m->y, 8, fcr, fcg, fcb, 3);
       }
       /* evocazioni */
@@ -1460,8 +1657,8 @@ void ab_update(double dt, unsigned keys) {
       /* pestone golem */
       if (m->type == 'X' && pdd < 2.2 && m->atk_cd <= 0) {
         m->atk_cd = 1.5;
-        hurt_player(m->dmg, false);
-        ab_burst(G.p.x, G.p.y, 12, 0.8, 0.7, 0.5, 4);
+        damage_hero(tgt_peer, m->dmg, false, false);
+        ab_burst(tgt_peer ? net_peer.x : G.p.x, tgt_peer ? net_peer.y : G.p.y, 12, 0.8, 0.7, 0.5, 4);
         G.shake = 0.45;
         ab_add_log("Pestone del Golem!");
       }
@@ -1471,12 +1668,15 @@ void ab_update(double dt, unsigned keys) {
         double vx = pdx / (pdd + 0.001), vy = pdy / (pdd + 0.001);
         m->x += vx * 3; m->y += vy * 3;
         G.shake = 0.4;
-        if (ab_dist(G.p.x, G.p.y, m->x, m->y) < 1.4) hurt_player(m->dmg, false);
+        double hx = tgt_peer ? net_peer.x : G.p.x;
+        double hy = tgt_peer ? net_peer.y : G.p.y;
+        if (ab_dist(hx, hy, m->x, m->y) < 1.4) damage_hero(tgt_peer, m->dmg, false, false);
       }
       /* contatto */
       if (pdd < 0.9 && m->atk_cd <= 0) {
         m->atk_cd = 1.2;
-        hurt_player(m->dmg, td->poison);
+        m->atk_anim = 0.4;
+        damage_hero(tgt_peer, m->dmg, td->poison, false);
       }
       m->rx += (m->x - m->rx) * fmin(1, dt * 10);
       m->ry += (m->y - m->ry) * fmin(1, dt * 10);
@@ -1486,7 +1686,19 @@ void ab_update(double dt, unsigned keys) {
     /* ---- IA comuni 1:1 ---- */
     double ddx = G.p.x - m->x, ddy = G.p.y - m->y;
     double dd = sqrt(ddx * ddx + ddy * ddy);
-    bool has_target = !G.p.dead && !G.p.downed && dd < m->aggro;
+    bool tgt_peer = false;
+    if (peer_targetable()) {
+      double qx = net_peer.x - m->x, qy = net_peer.y - m->y;
+      if (qx*qx + qy*qy < ddx*ddx + ddy*ddy) {
+        tgt_peer = true; ddx = qx; ddy = qy;
+        dd = sqrt(ddx * ddx + ddy * ddy);
+      }
+    }
+    double hx = tgt_peer ? net_peer.x : G.p.x;
+    double hy = tgt_peer ? net_peer.y : G.p.y;
+    bool hdown = tgt_peer ? net_peer.downed : G.p.downed;
+    bool hdead = tgt_peer ? net_peer.dead : G.p.dead;
+    bool has_target = !hdead && !hdown && dd < m->aggro;
     /* stati speciali in corso */
     if (m->fx_mode == 2 || m->fx_mode == 3) { /* dash / swoop in volo */
       m->fx_t += dt;
@@ -1496,7 +1708,7 @@ void ab_update(double dt, unsigned keys) {
       double lim = m->fx_mode == 2 ? 0.55 : 0.62;
       if (l < lim && !m->fx_hit) {
         m->fx_hit = true;
-        hurt_player(m->dmg, td->poison || m->fx_mode == 2);
+        damage_hero(tgt_peer, m->dmg, td->poison || m->fx_mode == 2, false);
       }
       if (m->fx_t >= m->fx_dur) { m->fx_mode = 0; m->atk_cd = 0.25; }
       m->rx += (m->x - m->rx) * fmin(1, dt * 10);
@@ -1507,9 +1719,9 @@ void ab_update(double dt, unsigned keys) {
       m->fx_t += dt;
       m->x += m->wx * dt; m->y += m->wy * dt;
       if (m->fx_t >= m->fx_dur) { m->fx_mode = 0; ab_burst(m->x, m->y, 8, 0.7, 0.5, 1, 3); }
-      else if (ab_dist(G.p.x, G.p.y, m->x, m->y) <= 0.45) {
-        hurt_player(m->dmg, td->poison);
-        ab_burst(G.p.x, G.p.y, 12, 0.7, 0.5, 1, 3);
+      else if (ab_dist(hx, hy, m->x, m->y) <= 0.45) {
+        damage_hero(tgt_peer, m->dmg, td->poison, false);
+        ab_burst(hx, hy, 12, 0.7, 0.5, 1, 3);
         m->fx_mode = 0;
       }
       m->rx = m->x; m->ry = m->y;
@@ -1517,8 +1729,8 @@ void ab_update(double dt, unsigned keys) {
     }
     if (m->dent_t > 0) {
       m->dent_t -= dt;
-      if (m->dent_t <= 0 && ab_dist(m->x, m->y, G.p.x, G.p.y) <= 1.5) {
-        hurt_player(m->dmg, false);
+      if (m->dent_t <= 0 && ab_dist(m->x, m->y, hx, hy) <= 1.5) {
+        damage_hero(tgt_peer, m->dmg, false, false);
         m->atk_cd = 0.25;
       }
     }
@@ -1527,21 +1739,22 @@ void ab_update(double dt, unsigned keys) {
       if (m->fx_t <= 0) {
         m->fx_mode = 0;
         m->atk_cd = 0.3;
-        if (m->wind_kind == 1) { m->fx_mode = 2; m->fx_t = 0; m->fx_dur = 0.24; m->fx_speed = 7.2; m->fx_hit = false; }
-        else if (m->wind_kind == 2) { m->fx_mode = 3; m->fx_t = 0; m->fx_dur = 0.30; m->fx_speed = 6.4; m->fx_hit = false; }
+        m->atk_anim = 0.3;
+        if (m->wind_kind == 1) { m->fx_mode = 2; m->fx_t = 0; m->fx_dur = 0.24; m->fx_speed = 7.2; m->fx_hit = false; m->atk_anim = 0.25; }
+        else if (m->wind_kind == 2) { m->fx_mode = 3; m->fx_t = 0; m->fx_dur = 0.30; m->fx_speed = 6.4; m->fx_hit = false; m->atk_anim = 0.25; }
         else if (m->wind_kind == 3) {
           for (int k = 0; k < 1; k++) {
-            if (ab_dist(m->x, m->y, G.p.x, G.p.y) <= 1.8) hurt_player(m->dmg, false);
+            if (ab_dist(m->x, m->y, hx, hy) <= 1.8) damage_hero(tgt_peer, m->dmg, false, false);
           }
           ab_burst(m->x, m->y, 14, 0.6, 0.6, 0.6, 4);
           G.shake = 0.35;
         } else if (m->wind_kind == 4) {
           AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 91 + i));
-          double vx2 = G.p.x - m->x, vy2 = G.p.y - m->y;
+          double vx2 = hx - m->x, vy2 = hy - m->y;
           double dd2 = sqrt(vx2*vx2 + vy2*vy2);
           if (dd2 <= 1.6 && dd2 > 0.01) {
             double dot = (vx2 / dd2) * m->facing_x + (vy2 / dd2) * m->facing_y;
-            if (dot >= 0.55) hurt_player(m->dmg + ab_rng_range(&rr, 0, 1), false);
+            if (dot >= 0.55) damage_hero(tgt_peer, m->dmg + ab_rng_range(&rr, 0, 1, false), false);
           }
           ab_burst(m->x + m->facing_x, m->y + m->facing_y, 8, 0.9, 0.9, 0.9, 3);
         }
@@ -1569,16 +1782,16 @@ void ab_update(double dt, unsigned keys) {
         if (!in_safe((int)floor(m->x + vx * mv * dt), (int)floor(m->y + vy * mv * dt)) ||
             in_safe((int)floor(m->x), (int)floor(m->y)))
           try_move(&m->x, &m->y, vx * mv * dt, vy * mv * dt);
-      } else if (m->atk_cd <= 0 && !G.p.dead && !G.p.downed) {
+      } else if (m->atk_cd <= 0 && !hdead && !hdown) {
         AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 131 + i * 17));
         if (td->dash) {
           m->fx_mode = 1; m->wind_kind = 1; m->fx_t = 0.35;
-          m->fx_tx = G.p.x; m->fx_ty = G.p.y;
+          m->fx_tx = hx; m->fx_ty = hy;
           m->atk_cd = 2.0 + ab_rng_next(&rr) * 0.8;
           ab_burst(m->x, m->y, 6, 0.5, 0.7, 0.4, 2);
         } else if (td->swoop) {
           m->fx_mode = 1; m->wind_kind = 2; m->fx_t = 0.35;
-          m->fx_tx = G.p.x; m->fx_ty = G.p.y;
+          m->fx_tx = hx; m->fx_ty = hy;
           m->atk_cd = 2.2 + ab_rng_next(&rr) * 0.8;
         } else if (td->ranged_range > 0) {
           double sp = td->beam ? 3.8 : 3.2;
@@ -1592,8 +1805,9 @@ void ab_update(double dt, unsigned keys) {
           ab_burst(m->x, m->y, 6, td->beam ? 0.5 : 0.7, td->beam ? 1.0 : 0.5, td->beam ? 0.5 : 0.8, 2);
         } else if (td->dbl) {
           m->atk_cd = 0.8 + ab_rng_next(&rr) * 0.2;
+          m->atk_anim = 0.28;
           m->dent_t = 0.22;
-          hurt_player(m->dmg, false);
+          damage_hero(tgt_peer, m->dmg, false, false);
         } else if (td->stomp) {
           m->fx_mode = 1; m->wind_kind = 3; m->fx_t = 0.55;
           m->atk_cd = 1.3 + ab_rng_next(&rr) * 0.4;
@@ -1602,8 +1816,9 @@ void ab_update(double dt, unsigned keys) {
           m->atk_cd = 1.15 + ab_rng_next(&rr) * 0.3;
         } else {
           m->atk_cd = 1.05 + ab_rng_next(&rr) * 0.3;
+          m->atk_anim = 0.28;
           int extra = ab_rng_range(&rr, 0, 1);
-          hurt_player(m->dmg + extra, td->poison);
+          damage_hero(tgt_peer, m->dmg + extra, td->poison, false);
           if (td->lifesteal) { m->hp += 2; if (m->hp > m->max_hp) m->hp = m->max_hp; }
         }
       }
@@ -1643,22 +1858,34 @@ void ab_update(double dt, unsigned keys) {
     }
     p->x = nx; p->y = ny;
     if (p->friendly) {
+      bool joined = (net_role == NET_JOIN && net_connected);
       for (int j = 0; j < MAX_MONSTERS; j++) {
         if (!G.mons[j].active) continue;
+        if (G.mons[j].hit_mark == p->id_mark) continue;
         if (ab_dist(p->x, p->y, G.mons[j].x, G.mons[j].y) < 0.45) {
-          G.mons[j].hp -= p->dmg;
+          if (joined) net_send_hit(j, p->dmg);
+          else G.mons[j].hp -= p->dmg;
           sfx_hit();
           char b[16]; snprintf(b, sizeof b, "%d", p->dmg);
           ab_float_text(G.mons[j].x, G.mons[j].y - 0.5, b, 1, 0.85, 0.4);
           ab_burst(p->x, p->y, 4, p->r, p->g, p->b, 2.5);
-          p->active = false;
+          if (p->pierce) G.mons[j].hit_mark = p->id_mark;
+          else { p->active = false; }
           break;
         }
       }
     } else {
-      if (!G.p.dead && ab_dist(p->x, p->y, G.p.x, G.p.y) < p->hit_r) {
-        hurt_player(p->dmg, p->poison);
-        if (p->web) { G.p.web_t = 3.0; ab_add_log("Intrappolato nella tela!"); }
+      bool hit_p = !G.p.dead && !G.p.downed && ab_dist(p->x, p->y, G.p.x, G.p.y) < p->hit_r;
+      bool hit_q = peer_targetable() && !net_peer.downed &&
+                   ab_dist(p->x, p->y, net_peer.x, net_peer.y) < p->hit_r;
+      if (hit_p || hit_q) {
+        bool to_peer = hit_q && (!hit_p ||
+          ab_dist(p->x, p->y, net_peer.x, net_peer.y) < ab_dist(p->x, p->y, G.p.x, G.p.y));
+        if (to_peer) net_send_hurt_to_peer(p->dmg, p->poison, p->web);
+        else {
+          hurt_player(p->dmg, p->poison);
+          if (p->web) { G.p.web_t = 3.0; ab_add_log("Intrappolato nella tela!"); }
+        }
         p->active = false;
       }
     }
@@ -1666,41 +1893,54 @@ void ab_update(double dt, unsigned keys) {
 
   /* oggetti a terra */
   if (!G.p.dead && !G.p.downed) {
+    bool joined = (net_role == NET_JOIN && net_connected);
+    static double take_cd = 0;
+    if (take_cd > 0) take_cd -= dt;
     for (int i = 0; i < MAX_ITEMS; i++) {
       AbItem *it = &G.items[i];
       if (!it->active) continue;
       double dx = G.p.x - it->x, dy = G.p.y - it->y;
       if (dx * dx + dy * dy > 0.62 * 0.62) continue;
+      if (joined) {
+        if (take_cd <= 0) { take_cd = 0.3; net_send_take(i); }
+        continue;
+      }
       it->active = false;
       if (it->kind == 0) {
         G.p.gold += it->amount;
+        sfx_pickup();
         char b[32]; snprintf(b, sizeof b, "+%d", it->amount);
         ab_float_text(G.p.x, G.p.y - 0.7, b, 0.83, 0.69, 0.22);
       } else if (it->kind == 1) {
         G.p.gold += it->amount;
+        sfx_gem();
         char b[48]; snprintf(b, sizeof b, "+%d gemma", it->amount);
         ab_float_text(G.p.x, G.p.y - 0.7, b, 0.56, 0.82, 1.0);
         ab_add_log("Gemma preziosa: oro!");
       } else if (it->kind == 2) {
         G.p.buffs[it->buff] = BUFF_DURATION[it->buff];
+        sfx_power();
         char b[48]; snprintf(b, sizeof b, "%s!", BUFF_NAMES[it->buff]);
         ab_float_text(G.p.x, G.p.y - 0.7, b, 0.6, 1, 0.6);
         ab_add_log("Potenziamento raccolto.");
       } else if (it->kind == 3) {
         G.p.potions += it->amount;
+        sfx_potion();
         ab_float_text(G.p.x, G.p.y - 0.7, "+pozione", 0.76, 0.27, 0.23);
       } else if (it->kind == 4) {
         G.p.mana_potions += it->amount;
+        sfx_mana();
         ab_float_text(G.p.x, G.p.y - 0.7, "+mana", 0.37, 0.63, 0.79);
       } else if (it->kind == 5) {
+        sfx_gem();
         equip_or_keep(it->slot, it->rarity, it->st_hp, it->st_dmg, it->st_spd, it->st_arm);
       }
     }
   }
 
-  /* respawn come hostRespawnTick */
+  /* respawn come hostRespawnTick (solo host/solo) */
   respawn_t -= dt;
-  {
+  if (net_role != NET_JOIN || !net_connected) {
     int cap = 9 + G.depth * 2;
     if (cap > 30) cap = 30;
     int alive = 0;
@@ -1731,14 +1971,17 @@ void ab_update(double dt, unsigned keys) {
             G.mons[j].speed = td->speed; G.mons[j].aggro = td->aggro;
             G.mons[j].is_boss = false; G.mons[j].affix = 0; G.mons[j].atk_cd = 0;
             G.mons[j].fx_mode = 0; G.mons[j].dent_t = 0;
+            G.mons[j].atk_anim = 0; G.mons[j].atk_dur = 0.3;
+            G.mons[j].phase = ((j * 37) % 100) / 100.0;
             break;
           }
         }
       }
     }
   }
+  }
   power_t -= dt;
-  if (power_t <= 0) {
+  if (power_t <= 0 && (net_role != NET_JOIN || !net_connected)) {
     AbRng rr; ab_rng_seed(&rr, (uint32_t)(G.time * 55 + 2));
     power_t = 30 + ab_rng_next(&rr) * 20;
     bool has = false;
@@ -1772,5 +2015,225 @@ void ab_update(double dt, unsigned keys) {
     G.floats[i].life -= dt;
     G.floats[i].y -= dt * 0.8;
     if (G.floats[i].life <= 0) G.floats[i].active = false;
+  }
+}
+
+/* ---------------- multiplayer LAN ---------------- */
+static bool peer_targetable(void) {
+  return net_role == NET_HOST && net_connected && net_peer.active && !net_peer.dead;
+}
+
+/* ferisce l'eroe giusto: compagno (via rete) o locale */
+static void damage_hero(bool peer, int dmg, bool poison, bool web) {
+  if (peer) net_send_hurt_to_peer(dmg, poison, web);
+  else hurt_player(dmg, poison);
+}
+
+void net_apply_hurt(int dmg, bool poison, bool web) {
+  hurt_player(dmg, poison);
+  if (web && !G.p.dead) { G.p.web_t = 3.0; ab_add_log("Intrappolato nella tela!"); }
+}
+
+void net_apply_giv(int kind, int amount, int buff, int rar, int slot,
+                   int s0, int s1, int s2, int s3) {
+  if (kind == 0 || kind == 1) {
+    G.p.gold += amount;
+    char b[32]; snprintf(b, sizeof b, "+%d", amount);
+    ab_float_text(G.p.x, G.p.y - 0.7, b, 1, 0.85, 0.3);
+    sfx_pickup();
+  } else if (kind == 2 && buff >= 0 && buff < BUFF_COUNT) {
+    G.p.buffs[buff] = BUFF_DURATION[buff];
+    sfx_power();
+    ab_float_text(G.p.x, G.p.y - 0.7, (char *)BUFF_NAMES[buff], 0.6, 1, 0.6);
+  } else if (kind == 3) {
+    G.p.potions += amount;
+    sfx_potion();
+  } else if (kind == 4) {
+    G.p.mana_potions += amount;
+    sfx_mana();
+  } else if (kind == 5 && slot >= 0 && slot < 5) {
+    sfx_gem();
+    equip_or_keep(slot, rar, s0, s1, s2, s3);
+  }
+}
+
+void net_apply_depth(int depth) {
+  if (depth < 1) depth = 1;
+  if (depth == G.depth) return;
+  ab_gen_depth(depth);
+  char b[64];
+  snprintf(b, sizeof b, "Piano %d (host)", depth);
+  ab_toast(b);
+}
+
+void net_apply_revive(void) {
+  if (!G.p.downed || G.p.dead) return;
+  G.p.downed = false;
+  G.p.downed_t = 0;
+  G.p.hp = G.p.max_hp / 2;
+  if (G.p.hp < 1) G.p.hp = 1;
+  sfx_revive();
+  ab_toast("Rianimato dal compagno!");
+  ab_add_log("Il compagno ti ha rianimato.");
+}
+
+void net_host_on_hit(int slot, int dmg) {
+  if (slot < 0 || slot >= MAX_MONSTERS) return;
+  if (!G.mons[slot].active) return;
+  G.mons[slot].hp -= dmg;
+  char b[16]; snprintf(b, sizeof b, "%d", dmg);
+  ab_float_text(G.mons[slot].x, G.mons[slot].y - 0.5, b, 1, 0.85, 0.4);
+}
+
+void net_host_on_take(int slot) {
+  if (slot < 0 || slot >= MAX_ITEMS) return;
+  AbItem *it = &G.items[slot];
+  if (!it->active) return;
+  it->active = false;
+  net_send_giv(it->kind, it->amount, it->buff, it->rarity, it->slot,
+               it->st_hp, it->st_dmg, it->st_spd, it->st_arm);
+  ab_burst(it->x, it->y, 6, 1, 0.9, 0.5, 2);
+}
+
+void net_host_on_open(int idx) {
+  if (idx < 0 || idx >= G.chest_count) return;
+  AbChest *c = &G.chests[idx];
+  if (!c->active || c->open) return;
+  if (c->boss_chest && !G.boss_dead) return;
+  c->open = true;
+  AbRng r; ab_rng_seed(&r, (uint32_t)(G.time * 131 + idx * 17 + G.depth));
+  if (c->boss_chest) {
+    int gold = 60 + ab_rng_range(&r, 0, 25 * G.depth - 1 > 0 ? 25 * G.depth - 1 : 0);
+    net_send_giv(0, gold, 0, 0, 0, 0, 0, 0, 0);
+    net_send_giv(3, 1, 0, 0, 0, 0, 0, 0, 0);
+    net_send_giv(4, 1, 0, 0, 0, 0, 0, 0, 0);
+    int rar = ab_rng_next(&r) < 0.45 ? R_LEGGENDARIO : R_EPICO;
+    int s = ab_rng_range(&r, 0, 4);
+    AbRng r2; ab_rng_seed(&r2, (uint32_t)(G.time * 977 + 9));
+    int rr = rarity_roll(&r2, G.depth);
+    (void)rr;
+    AbEquip e; make_equip(&r2, G.depth, s, rar, &e);
+    net_send_giv(5, 0, 0, e.rarity, s, e.hp, e.dmg_pct, e.spd_pct, e.arm_pct);
+  } else {
+    int gold = 6 + ab_rng_range(&r, 0, 9 * G.depth - 1 > 0 ? 9 * G.depth - 1 : 0);
+    net_send_giv(0, gold, 0, 0, 0, 0, 0, 0, 0);
+    if (ab_rng_next(&r) < 0.32) net_send_giv(3, 1, 0, 0, 0, 0, 0, 0, 0);
+    if (ab_rng_next(&r) < 0.24) net_send_giv(4, 1, 0, 0, 0, 0, 0, 0, 0);
+    if (ab_rng_next(&r) < 0.2) {
+      int s = ab_rng_range(&r, 0, 4);
+      int rar = rarity_roll(&r, G.depth);
+      AbEquip e; make_equip(&r, G.depth, s, rar, &e);
+      net_send_giv(5, 0, 0, e.rarity, s, e.hp, e.dmg_pct, e.spd_pct, e.arm_pct);
+    }
+  }
+  ab_burst(c->tx + 0.5, c->ty + 0.5, 12, 1, 0.85, 0.3, 3.5);
+  sfx_chest();
+}
+
+void net_host_on_stairs(void) {
+  ab_descend();
+  net_send_depth(G.depth);
+}
+
+void net_host_on_revive(void) {
+  if (!G.p.downed || G.p.dead) return;
+  G.p.downed = false;
+  G.p.downed_t = 0;
+  G.p.hp = G.p.max_hp / 2;
+  if (G.p.hp < 1) G.p.hp = 1;
+  sfx_revive();
+  ab_toast("Rianimato dal compagno!");
+}
+
+/* adotta lo snapshot dell'host (joiner): sostituzione integrale */
+void net_adopt_snapshot(const unsigned char *pl, int n) {
+  int o = 0;
+  if (n < 6) return;
+  int depth = pl[o++];
+  int bact = pl[o++];
+  int bdead = pl[o++];
+  int bhp = (pl[o] | (pl[o + 1] << 8));
+  if (bhp >= 32768) bhp -= 65536;
+  o += 2;
+  if (depth != G.depth) {
+    ab_gen_depth(depth);
+  }
+  if (o >= n) return;
+  int nm = pl[o++];
+  for (int i = 0; i < MAX_MONSTERS; i++) G.mons[i].active = false;
+  for (int k = 0; k < nm && o + 11 <= n; k++) {
+    int on = pl[o++];
+    int ty = pl[o++];
+    float fx, fy;
+    memcpy(&fx, pl + o, 4); o += 4;
+    memcpy(&fy, pl + o, 4); o += 4;
+    int hp = pl[o] | (pl[o + 1] << 8);
+    if (hp >= 32768) hp -= 65536;
+    o += 2;
+    int dmg = pl[o] | (pl[o + 1] << 8);
+    if (dmg >= 32768) dmg -= 65536;
+    o += 2;
+    if (!on || k >= MAX_MONSTERS) continue;
+    const AbMonDef *td = ab_mon_def((char)ty);
+    if (!td) continue;
+    AbMonster *m = &G.mons[k];
+    m->active = true;
+    m->type = (char)ty;
+    m->x = fx; m->y = fy;
+    m->rx += (m->x - m->rx) * 0.5;
+    m->ry += (m->y - m->ry) * 0.5;
+    if (m->rx == 0 && m->ry == 0) { m->rx = m->x; m->ry = m->y; }
+    m->hp = hp; m->dmg = dmg;
+    m->max_hp = ab_scaled_stat(td->hp, G.depth, td->boss ? 0.10 : 0.16);
+    if (m->max_hp < 1) m->max_hp = 1;
+    if (m->hp > m->max_hp) m->hp = m->max_hp;
+    m->speed = td->speed; m->aggro = td->aggro;
+    m->is_boss = td->boss;
+    m->affix = 0;
+    if (m->is_boss) {
+      G.boss_hp = hp;
+      G.boss_max = m->max_hp;
+    }
+  }
+  if (o >= n) return;
+  int ni = pl[o++];
+  for (int i = 0; i < MAX_ITEMS; i++) G.items[i].active = false;
+  G.item_count = 0;
+  for (int k = 0; k < ni && o + 16 <= n; k++) {
+    int on = pl[o++];
+    int kind = pl[o++];
+    float fx, fy;
+    memcpy(&fx, pl + o, 4); o += 4;
+    memcpy(&fy, pl + o, 4); o += 4;
+    int amount = pl[o] | (pl[o + 1] << 8);
+    if (amount >= 32768) amount -= 65536;
+    o += 2;
+    int buff = pl[o++], rar = pl[o++], slot = pl[o++];
+    int s0 = pl[o] | (pl[o + 1] << 8); o += 2;
+    int s1 = pl[o] | (pl[o + 1] << 8); o += 2;
+    int s2 = pl[o] | (pl[o + 1] << 8); o += 2;
+    int s3 = pl[o] | (pl[o + 1] << 8); o += 2;
+    if (!on || k >= MAX_ITEMS) continue;
+    AbItem *it = &G.items[k];
+    it->active = true;
+    it->kind = kind; it->x = fx; it->y = fy;
+    it->amount = amount; it->buff = buff; it->rarity = rar; it->slot = slot;
+    it->st_hp = s0; it->st_dmg = s1; it->st_spd = s2; it->st_arm = s3;
+    G.item_count++;
+  }
+  if (o + 5 > n) return;
+  uint32_t mask = (uint32_t)pl[o] | ((uint32_t)pl[o + 1] << 8) |
+                  ((uint32_t)pl[o + 2] << 16) | ((uint32_t)pl[o + 3] << 24);
+  o += 4;
+  for (int i = 0; i < G.chest_count && i < 24; i++)
+    G.chests[i].open = (mask & (1u << i)) ? true : false;
+  G.boss_active = bact ? true : false;
+  G.boss_dead = bdead ? true : false;
+  G.map.gates_closed = (G.boss_active && !G.boss_dead);
+  if (!G.boss_dead) {
+    bool any = false;
+    for (int i = 0; i < MAX_MONSTERS; i++)
+      if (G.mons[i].active && G.mons[i].is_boss) any = true;
+    if (!any) { G.boss_active = false; G.map.gates_closed = false; }
   }
 }

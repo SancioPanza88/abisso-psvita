@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define ABISSO_VERSION "1.0.4"
+#define ABISSO_VERSION "1.1.0"
 #define ABISSO_TITLEID "ABSS00001"
 
 #define SCR_W 960
@@ -84,6 +84,7 @@ typedef struct {
 
 const AbClassDef *ab_class_def(int id);
 int ab_class_from_key(const char *key);
+double ab_class_atk_dur(int id);
 extern const char *AB_CLASS_KEYS[CLS_COUNT];
 
 /* ---------- Mostri ---------- */
@@ -114,6 +115,7 @@ const char *ab_rarity_name(int r);
 void ab_rarity_color(int r, double *pr, double *pg, double *pb);
 bool ab_sprite_crop(const char *key, int *x, int *y, int *w, int *h);
 bool ab_entity_sheet(const char *key, const char **sheet, int *cell, int *cells);
+const char *ab_entity_file(const char *key);
 typedef enum { BUFF_RAGE = 0, BUFF_SHIELD, BUFF_HASTE, BUFF_FOCUS, BUFF_COUNT } AbBuff;
 extern const double BUFF_DURATION[BUFF_COUNT];
 extern const char *BUFF_NAMES[BUFF_COUNT];
@@ -142,6 +144,9 @@ typedef struct {
   double fx_t, fx_dur, fx_tx, fx_ty, fx_speed;
   bool fx_hit;
   double dent_t;
+  unsigned hit_mark; /* ultimo proiettile perforante che l'ha colpito */
+  double atk_anim, atk_dur; /* timer posa d'attacco (render) */
+  double phase; /* 0..1 fase animazione */
 } AbMonster;
 
 typedef struct {
@@ -152,9 +157,11 @@ typedef struct {
   bool friendly;
   bool poison;   /* avvelena */
   bool web;      /* rallenta */
+  bool pierce;   /* perfora (onda di chi) */
   double hit_r;  /* raggio impatto */
   double r, g, b;
   double size;
+  unsigned id_mark;
 } AbProj;
 
 typedef struct {
@@ -249,6 +256,7 @@ typedef struct {
 typedef enum {
   ST_LOGIN = 0,
   ST_CLASS,
+  ST_NET,
   ST_GAME,
   ST_DEAD
 } AbAppState;
@@ -311,6 +319,8 @@ void ab_toast(const char *s);
 void ab_loot_banner(const char *s, double r, double g, double b);
 void ab_float_text(double x, double y, const char *s, double r, double g, double b);
 void ab_burst(double x, double y, int n, double r, double g, double b, double spd);
+void ab_shock(double x, double y, double r, double g, double b);
+void ab_crit_flash(void);
 bool ab_is_walkable(int tx, int ty);
 void ab_save_record(void);
 void ab_load_record(void);

@@ -3,6 +3,7 @@
 #include "render.h"
 #include "input.h"
 #include "audio.h"
+#include "net.h"
 #include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@ int main(int argc, char *argv[]) {
   }
   in_init();
   au_init();
+  net_init();
 
   Uint32 last = SDL_GetTicks();
   bool running = true;
@@ -50,13 +52,15 @@ int main(int argc, char *argv[]) {
     /* update logica solo in game (render gestisce i toggle) */
     ab_update(dt, keys);
     au_update(dt);
-    ren_frame(keys);
+    net_tick(dt);
+    ren_frame(keys, dt);
 
     /* uscita PC: finestra chiusa gestita come PAUSE dal login */
   }
 
   au_quit();
   in_quit();
+  net_quit();
   ren_quit();
   SDL_Quit();
   return 0;

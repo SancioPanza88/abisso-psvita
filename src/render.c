@@ -4,6 +4,7 @@
 #include "render.h"
 #include "input.h"
 #include "audio.h"
+#include "net.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <stdio.h>
@@ -61,12 +62,19 @@ static SDL_Texture *ent_tex_src(const char *key, SDL_Rect *src, bool *has) {
     }
     return NULL;
   }
-  SDL_Texture *t = spr_get(key);
+  SDL_Texture *t = spr_get(ab_entity_file(key));
   if (!t) return NULL;
   int cx, cy, cw, ch;
   if (ab_sprite_crop(key, &cx, &cy, &cw, &ch)) {
     src->x = cx; src->y = cy; src->w = cw; src->h = ch;
     *has = true;
+  } else {
+    /* fallback: crop per file (stesse coordinate della chiave) */
+    const char *fn = ab_entity_file(key);
+    if (fn != key && ab_sprite_crop(fn, &cx, &cy, &cw, &ch)) {
+      src->x = cx; src->y = cy; src->w = cw; src->h = ch;
+      *has = true;
+    }
   }
   return t;
 }
@@ -303,6 +311,26 @@ static void draw_ent(const char *key, double sx, double sy, double scale, double
   }
 }
 
+/* disegno entita con dimensioni/rotazione esplicite (per le animazioni) */
+static void draw_ent_ex(const char *key, double sx, double sy, double dw, double dh,
+                        double alpha, double angle_deg, bool flip) {
+  SDL_Rect src, *srcp = NULL;
+  bool has = false;
+  SDL_Texture *t = ent_tex_src(key, &src, &has);
+  if (has) srcp = &src;
+  SDL_Rect d = {(int)(sx - dw / 2), (int)(sy - dh / 2), (int)dw, (int)dh};
+  if (d.w < 1) d.w = 1;
+  if (d.h < 1) d.h = 1;
+  if (t) {
+    SDL_SetTextureAlphaMod(t, (Uint8)(alpha * 255));
+    SDL_RenderCopyEx(ren, t, srcp, &d, angle_deg, NULL,
+      flip ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
+    SDL_SetTextureAlphaMod(t, 255);
+  } else {
+    draw_box(d.x, d.y, d.w, d.h, 200, 170, 90, (Uint8)(alpha * 255), true);
+  }
+}
+
 static void draw_spr(const char *name, double sx, double sy, double scale, double alpha) {
   SDL_Texture *t = spr_get(name);
   int dw = (int)(tile_px() * scale);
@@ -320,6 +348,252 @@ static void draw_spr(const char *name, double sx, double sy, double scale, doubl
     draw_box(d.x, d.y, d.w, d.h, 120, 90, 60, (Uint8)(alpha * 255), true);
     draw_text(d.x + d.w / 2 - 6, d.y + d.h / 2 - 8, "?", 2, 255, 255, 255);
   }
+}
+
+/* ---------- shockwave rings + crit flash (effetti web) ---------- */
+#define MAXSHOCK 8
+static struct { bool on; double x, y, life, max; double r, g, b; } shocks[MAXSHOCK];
+static double crit_flash_t = 0;
+void ab_shock(double x, double y, double r, double g, double b) {
+  for (int i = 0; i < MAXSHOCK; i++) {
+    if (shocks[i].on) continue;
+    shocks[i].on = true;
+    shocks[i].x = x; shocks[i].y = y;
+    shocks[i].life = shocks[i].max = 0.45;
+    shocks[i].r = r; shocks[i].g = g; shocks[i].b = b;
+    return;
+  }
+}
+void ab_crit_flash(void) { crit_flash_t = 0.12; }
+static void draw_shocks(double dt) {
+  for (int i = 0; i < MAXSHOCK; i++) {
+    if (!shocks[i].on) continue;
+    shocks[i].life -= dt;
+    if (shocks[i].life <= 0) { shocks[i].on = false; continue; }
+    double k = 1 - shocks[i].life / shocks[i].max;
+    double sx, sy;
+    w2s(shocks[i].x, shocks[i].y, &sx, &sy);
+    int rad = (int)(tile_px() * (0.5 + k * 2.6));
+    Uint8 a = (Uint8)(220 * (1 - k));
+    draw_ring((int)sx, (int)sy, rad,
+      (Uint8)(shocks[i].r * 255), (Uint8)(shocks[i].g * 255), (Uint8)(shocks[i].b * 255));
+    draw_ring((int)sx, (int)sy, rad > 3 ? rad - 3 : 0,
+      (Uint8)(shocks[i].r * 255), (Uint8)(shocks[i].g * 255), (Uint8)(shocks[i].b * 255));
+    (void)a;
+  }
+  if (crit_flash_t > 0) {
+    crit_flash_t -= dt;
+    draw_box(0, 0, SCR_W, SCR_H, 255, 255, 255, 40, true);
+  }
+}
+
+/* ---------- animazioni 1:1 (drawSprite della web) ---------- */
+static void ent_anim(const char *flavor, bool is_boss, bool moving,
+                     double atk_t, double atk_dur, double phase01, double charge_t,
+                     double size_px,
+                     double *bob, double *rot, double *sxs, double *sys,
+                     double *alpha, double *lunge_px) {
+  double t = G.torch_clk;
+  double phase = phase01 * 2 * 3.14159265;
+  double b = 0, r = 0, br = 1, sx = 1, sy = 1, am = 1, lg = 0;
+  if (is_boss) {
+    if (!strcmp(flavor, "boss_lich")) {
+      b = 2.6 + sin(t * 2.2 + phase) * 2.2;
+      r = sin(t * 1.1 + phase) * 0.04;
+      br = 1 + 0.03 * sin(t * 2.2 + phase);
+      am = 0.92 + 0.08 * sin(t * 2.2 + phase);
+      if (moving) { b += fabs(sin(t * 6 + phase)) * 2.4; r += sin(t * 6 + phase) * 0.06; }
+    } else if (!strcmp(flavor, "boss_melme")) {
+      br = 1 + 0.12 * sin(t * 2.6 + phase);
+      b = 1.2 + sin(t * 2.4 + phase) * 1.2;
+      if (moving) { sy = 1 + 0.16 * sin(t * 5 + phase); sx = 1 - 0.12 * sin(t * 5 + phase); }
+    } else if (!strcmp(flavor, "boss_golem")) {
+      br = 1 + 0.02 * sin(t * 2 + phase);
+      if (moving) {
+        b = fabs(sin(t * 3.6 + phase)) * 2.6;
+        r = sin(t * 3.6 + phase) * 0.045;
+        sy = 1 - 0.07 * fabs(sin(t * 3.6 + phase));
+      } else r = sin(t * 1.4 + phase) * 0.02;
+    } else if (!strcmp(flavor, "boss_ragno")) {
+      double g = t * 9 + phase, beat = fabs(sin(g));
+      b = 1.6 + beat * 3.6 + sin(t * 27 + phase) * 0.7;
+      r = sin(g) * 0.07 + sin(g * 0.5 + 1.1) * 0.03;
+      if (moving) { sy = 1 + beat * 0.045; sx = 1 + (1 - beat) * 0.03; }
+    } else if (!strcmp(flavor, "boss_ratti")) {
+      b = fabs(sin(t * 9 + phase)) * 3 + sin(t * 13 + phase) * 1.5;
+      r = sin(t * 9 + phase) * 0.07 + sin(t * 4.4 + phase) * 0.02;
+      br = 1 + 0.02 * sin(t * 4 + phase);
+      if (moving) { b += fabs(sin(t * 12 + phase)) * 2; r += sin(t * 12 + phase) * 0.04; }
+    } else {
+      br = 1 + (!strcmp(flavor, "drago") ? 0.025 : 0.02) * sin(t * 2.6 + phase);
+      if (moving) b = fabs(sin(t * 5.5 + phase)) * 2;
+    }
+  } else if (!strcmp(flavor, "guerriero") || !strcmp(flavor, "ladro") ||
+             !strcmp(flavor, "mago") || !strcmp(flavor, "ranger") ||
+             !strcmp(flavor, "paladino") || !strcmp(flavor, "negromante") ||
+             !strcmp(flavor, "bardo") || !strcmp(flavor, "monaco")) {
+    br = 1 + 0.014 * sin(t * 2.3 + phase);
+    if (moving) {
+      b = fabs(sin(t * 7.2 + phase)) * 3.4;
+      r = sin(t * 7.2 + phase) * 0.045;
+      sy = 1 + 0.06 * sin(t * 7.2 + phase);
+    }
+  } else if (!strcmp(flavor, "melma") || !strcmp(flavor, "gelatina")) {
+    br = 1 + 0.09 * sin(t * 3 + phase);
+    if (moving) { sy = 1 + 0.14 * sin(t * 6 + phase); sx = 1 - 0.1 * sin(t * 6 + phase); }
+  } else if (!strcmp(flavor, "pipistrello")) {
+    b = moving ? fabs(sin(t * 13 + phase)) * 4.5 : 1.8 + sin(t * 5 + phase) * 1.2;
+    r = sin(t * 13 + phase) * 0.14;
+  } else if (!strcmp(flavor, "spettro")) {
+    b = 3 + sin(t * 2.2 + phase) * 2;
+    br = 1 + 0.04 * sin(t * 2.2 + phase);
+    am = 0.9 + 0.1 * sin(t * 2.2 + phase);
+  } else if (!strcmp(flavor, "ragno")) {
+    if (moving) {
+      double g = t * 17 + phase, beat = fabs(sin(g));
+      b = beat * 4.5 + fabs(sin(g * 0.5)) * 1.8 + sin(t * 31 + phase) * 0.8;
+      r = sin(g) * 0.08 + sin(g * 0.5 + 1.1) * 0.035;
+      sy = 1 + beat * 0.05;
+      sx = 1 + (1 - beat) * 0.035;
+    } else {
+      b = 1.3 + sin(t * 6.5 + phase) * 1.4;
+      r = sin(t * 3.5 + phase) * 0.03;
+      sy = 1 + 0.03 * sin(t * 6.5 + phase);
+    }
+  } else if (!strcmp(flavor, "ratto")) {
+    if (moving) b = fabs(sin(t * 9 + phase)) * 2.6;
+  } else if (!strcmp(flavor, "orco")) {
+    if (atk_t > 0) {
+      double pr = 1 - atk_t / (atk_dur > 0 ? atk_dur : 0.3);
+      if (pr < 0) pr = 0;
+      if (pr > 1) pr = 1;
+      double wind = pr < 0.3 ? sin((pr / 0.3) * 3.14159265 * 0.5) : 0;
+      r = -wind * 0.16;
+      sy = 1 - wind * 0.06;
+      sx = 1 - wind * 0.04;
+    } else if (moving) {
+      double g = t * 7 + phase, step = fabs(sin(g));
+      b = step * 3.8;
+      r = sin(g) * 0.06;
+      sy = 1 - step * 0.05;
+      sx = 1 + sin(g) * 0.025;
+    } else {
+      b = sin(t * 2.3 + phase) * 1.6;
+      r = sin(t * 0.9 + phase) * 0.035;
+      sy = 1 + 0.045 * sin(t * 2.3 + phase);
+    }
+  } else if (!strcmp(flavor, "prof")) {
+    double ck = charge_t > 0 ? (charge_t / 0.8 > 1 ? 1 : charge_t / 0.8) : 0;
+    b = 1.6 + sin(t * 2.6 + phase) * 1.5;
+    r = sin(t * 1.1 + phase) * 0.03;
+    br = 1 + 0.028 * sin(t * 2.6 + phase);
+    if (moving) {
+      b += fabs(sin(t * 7 + phase)) * 2.2;
+      r += sin(t * 7 + phase) * 0.05;
+    }
+    if (charge_t > 0) {
+      br = 1 + 0.05 * sin(t * (3 + 6 * ck) + phase);
+      b += sin(t * 14 + phase) * 0.6 * ck;
+      r = sin(t * 14 + phase) * 0.03 * ck;
+    }
+  } else if (!strcmp(flavor, "serpente")) {
+    double g = t * (moving ? 7 : 4) + phase;
+    b = sin(g) * 2.2;
+    r = sin(g) * 0.12;
+    sy = 1 + 0.04 * sin(g * 0.5);
+  } else if (!strcmp(flavor, "arpia")) {
+    double g = t * 10 + phase;
+    b = fabs(sin(g)) * 3.6 + (moving ? 0 : 0.8);
+    r = sin(g) * 0.09;
+    sy = 1 + 0.03 * sin(g * 2);
+  } else if (!strcmp(flavor, "cavaliere") || !strcmp(flavor, "cavaliere_alt")) {
+    double g = t * (moving ? 5.5 : 2) + phase;
+    b = fabs(sin(g)) * 2.8;
+    r = sin(g) * 0.04;
+    sy = 1 - 0.05 * fabs(sin(g));
+  } else if (!strcmp(flavor, "cultista")) {
+    b = 1.8 + sin(t * 2.5 + phase) * 1.6;
+    r = sin(t * 0.9 + phase) * 0.035;
+    br = 1 + 0.025 * sin(t * 2.5 + phase);
+    if (moving) b += fabs(sin(t * 6 + phase)) * 2;
+  } else if (!strcmp(flavor, "mantide")) {
+    double g = t * (moving ? 12 : 5) + phase;
+    b = fabs(sin(g)) * 3.4;
+    r = sin(g) * 0.05 + sin(g * 0.5) * 0.03;
+    if (moving) { sx = 1 + 0.03 * sin(g); sy = 1 - 0.05 * fabs(sin(g)); }
+  } else if (!strcmp(flavor, "sciamano")) {
+    double g = t * (moving ? 7 : 3.4) + phase;
+    b = fabs(sin(g)) * 4;
+    r = sin(g * 0.5) * 0.06;
+    br = 1 + 0.02 * sin(g);
+  } else if (!strcmp(flavor, "golem")) {
+    double g = t * (moving ? 3.6 : 1.8) + phase;
+    b = fabs(sin(g)) * 2.4;
+    r = sin(g) * 0.05;
+    sy = 1 - 0.06 * fabs(sin(g));
+    br = 1 + 0.015 * sin(g * 0.5);
+  } else {
+    if (moving) b = fabs(sin(t * 8 + phase)) * 2.2;
+  }
+  sx *= br; sy *= br;
+  if (atk_t > 0) {
+    double pr = 1 - atk_t / (atk_dur > 0 ? atk_dur : 0.25);
+    if (pr < 0) pr = 0;
+    if (pr > 1) pr = 1;
+    double p = sin(pr * 3.14159265);
+    double wind = pr < 0.22 ? sin((pr / 0.22) * 3.14159265 * 0.5) : 0;
+    lg = p * 0.22 * size_px - wind * 0.22 * size_px * 0.28;
+    sx *= 1 + 0.16 * p - wind * 0.06;
+    sy *= 1 - 0.14 * p + wind * 0.08;
+    int hspec = -1;
+    if (!strcmp(flavor, "ladro")) hspec = 1;
+    else if (!strcmp(flavor, "mago") || !strcmp(flavor, "negromante")) hspec = 2;
+    else if (!strcmp(flavor, "ranger")) hspec = 3;
+    else if (!strcmp(flavor, "paladino")) hspec = 4;
+    else if (!strcmp(flavor, "bardo")) hspec = 6;
+    else if (!strcmp(flavor, "monaco")) hspec = 7;
+    else if (!strcmp(flavor, "prof")) hspec = 8;
+    else if (!strcmp(flavor, "guerriero")) hspec = 0;
+    if (hspec == 1) {
+      double d2 = fabs(sin(pr * 3.14159265 * 2));
+      lg = sin(pr * 3.14159265) * 0.14 * size_px + d2 * 0.10 * size_px;
+      sx *= 1 + 0.10 * d2; sy *= 1 - 0.10 * d2;
+      r += sin(pr * 3.14159265 * 2) * 0.18;
+      b += fabs(sin(pr * 3.14159265 * 3)) * 2;
+    } else if (hspec == 4) {
+      r += sin(pr * 3.14159265) * 0.45;
+      lg = sin(pr * 3.14159265) * 0.20 * size_px;
+      sy *= 1 + 0.18 * p; sx *= 1 - 0.12 * p;
+      b += 2 * sin(pr * 3.14159265);
+    } else if (hspec == 6) {
+      lg = sin(pr * 3.14159265) * 0.30 * size_px;
+      r += sin(pr * 3.14159265) * 0.12;
+      sx *= 1 + 0.22 * p; sy *= 1 - 0.10 * p;
+    } else if (hspec == 7) {
+      b = fabs(sin(pr * 3.14159265 * 2)) * 4;
+      r += sin(pr * 3.14159265 * 2) * 0.25;
+      sx *= 1 + 0.08 * sin(pr * 3.14159265 * 2);
+      lg = sin(pr * 3.14159265) * 0.12 * size_px;
+    } else if (hspec == 3) {
+      r += sin(pr * 3.14159265) * 0.20 - 0.10;
+      lg = sin(pr * 3.14159265) * 0.10 * size_px;
+      b += sin(pr * 3.14159265 * 2) * 1.5;
+    } else if (hspec == 2) {
+      b -= fabs(sin(pr * 3.14159265)) * 3;
+      r += sin(pr * 3.14159265) * 0.18;
+      lg = sin(pr * 3.14159265) * 0.08 * size_px;
+      sx *= 1 - 0.04 * sin(pr * 3.14159265);
+    } else if (hspec == 8) {
+      lg = p * 0.14 * size_px;
+      sx *= 1 + 0.12 * p; sy *= 1 - 0.06 * p;
+      r += sin(pr * 3.14159265) * 0.10;
+    } else if (hspec == 0) {
+      r += sin(pr * 3.14159265) * 0.32;
+      lg = p * 0.20 * size_px;
+      sx *= 1 + 0.12 * p; sy *= 1 - 0.12 * p;
+    }
+  }
+  *bob = b; *rot = r; *sxs = sx; *sys = sy; *alpha = am; *lunge_px = lg;
 }
 
 /* ---------- stati UI ---------- */
@@ -471,18 +745,19 @@ static void draw_world(void) {
     double sx, sy;
     w2s(m->rx, m->ry, &sx, &sy);
     sx += shx; sy += shy;
-    double bob = sin(G.time * 3 + order[i].idx) * 2;
-    /* ombra */
-    draw_box((int)(sx - t * 0.3), (int)(sy + t * 0.32), (int)(t * 0.6), (int)(t * 0.14), 0, 0, 0, 120, true);
     const AbMonDef *td = ab_mon_def(m->type);
     const char *ekey = td ? td->sprite : "zombie";
     double sc = m->is_boss ? 1.7 : 1.0;
-    if (m->affix == 1) bob += sin(G.time * 10) * 1.5;
-    {
-      double breathe = 1 + 0.03 * sin(G.time * 2.2 + order[i].idx);
-      (void)breathe;
-      draw_ent(ekey, sx, sy + bob - (m->is_boss ? 6 : 0), sc, 1.0, 0, m->facing_x < -0.05);
-    }
+    if (m->affix == 1) sc *= 1.05;
+    bool moving = fabs(m->x - m->rx) + fabs(m->y - m->ry) > 0.08;
+    double bob, rot, sxs, sys, am, lg;
+    ent_anim(ekey, m->is_boss, moving, m->atk_anim, m->atk_dur, m->phase, 0,
+             t * sc, &bob, &rot, &sxs, &sys, &am, &lg);
+    /* ombra ancorata al pavimento */
+    draw_box((int)(sx - t * 0.3), (int)(sy + t * 0.32), (int)(t * 0.6), (int)(t * 0.14), 0, 0, 0, 120, true);
+    double dw = t * sc * sxs, dh = t * sc * sys;
+    double ex = sx + m->facing_x * lg, ey = sy + bob - (m->is_boss ? 6 : 0) + m->facing_y * lg * 0.3;
+    draw_ent_ex(ekey, ex, ey, dw, dh, am, rot * 57.2958, m->facing_x < -0.05);
     if (m->affix > 0) {
       const char *a = m->affix == 1 ? ">" : m->affix == 2 ? "*" : "+";
       draw_text((int)sx - 4, (int)sy - (int)t - 8, a, 2, 255, m->affix == 2 ? 100 : 220, 80);
@@ -502,24 +777,31 @@ static void draw_world(void) {
     w2s(G.p.rx, G.p.ry, &sx, &sy);
     sx += shx; sy += shy;
     if (!G.p.dead) {
-      double bob = fabs(sin(G.time * 6)) * 2;
-      if (G.p.downed) bob = 0;
       draw_box((int)(sx - t * 0.3), (int)(sy + t * 0.32), (int)(t * 0.6), (int)(t * 0.14), 0, 0, 0, 130, true);
       const AbClassDef *c = ab_class_def(G.p.cls);
       double sc = 1.15;
       if (G.p.cls == CLS_PROF) sc = 1.25;
       Uint8 alpha = 255;
       if (G.p.iframes > 0 && ((int)(G.time * 12) % 2 == 0)) alpha = 120;
+      bool pmoving = fabs(G.p.x - G.p.rx) + fabs(G.p.y - G.p.ry) > 0.08;
+      double bob, rot, sxs, sys, am, lg;
+      ent_anim(c->sprite, false, pmoving,
+               G.p.anim_t, ab_class_atk_dur(G.p.cls),
+               ((double)(ab_hash_str(G.p.name) % 100)) / 100.0,
+               G.p.cls == CLS_PROF ? (G.p.charge_t > 0 ? G.p.charge_t : 0) : 0,
+               t * sc, &bob, &rot, &sxs, &sys, &am, &lg);
+      if (G.p.downed) { bob = 0; }
       {
+        double dw = t * sc * sxs, dh = t * sc * sys;
+        double ex = sx + G.p.fx * lg, ey = sy + bob - 4 + G.p.fy * lg * 0.3;
         SDL_Rect src, *srcp = NULL;
         bool has = false;
         SDL_Texture *tt = ent_tex_src(c->sprite, &src, &has);
         if (has) srcp = &src;
-        int dw = (int)(t * sc), dh = (int)(t * sc);
-        SDL_Rect d = {(int)(sx - dw / 2), (int)(sy - dh / 2 + bob) - 4, dw, dh};
+        SDL_Rect d = {(int)(ex - dw / 2), (int)(ey - dh / 2), (int)dw, (int)dh};
         if (tt) {
-          SDL_SetTextureAlphaMod(tt, alpha);
-          SDL_RenderCopyEx(ren, tt, srcp, &d, G.p.anim_t > 0 ? 12 * G.p.fx : 0, NULL,
+          SDL_SetTextureAlphaMod(tt, (Uint8)(alpha * am));
+          SDL_RenderCopyEx(ren, tt, srcp, &d, rot * 57.2958 + (G.p.anim_t > 0 ? 12 * G.p.fx : 0), NULL,
             G.p.fx < -0.05 ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
           SDL_SetTextureAlphaMod(tt, 255);
         } else {
@@ -532,6 +814,31 @@ static void draw_world(void) {
         draw_box((int)ax - 8, (int)ay - 3, 16, 6, 255, 240, 200, 200, true);
       }
       if (G.p.downed) draw_text((int)sx - 30, (int)sy - 40, "AIUTO!", 2, 255, 80, 80);
+    }
+  }
+  /* compagno LAN */
+  if (net_connected && net_peer.active && !net_peer.dead) {
+    double sx, sy;
+    w2s(net_peer.rx, net_peer.ry, &sx, &sy);
+    sx += shx; sy += shy;
+    int ptx = (int)net_peer.x, pty = (int)net_peer.y;
+    bool see = ptx >= 0 && pty >= 0 && ptx < G.map.w && pty < G.map.h &&
+               (G.map.visible[pty][ptx] || G.map.visited[pty][ptx]);
+    if (see) {
+      const AbClassDef *pc = ab_class_def(net_peer.cls);
+      draw_box((int)(sx - t * 0.3), (int)(sy + t * 0.32), (int)(t * 0.6), (int)(t * 0.14), 0, 0, 0, 130, true);
+      draw_ent(pc->sprite, sx, sy, 1.1, net_peer.downed ? 0.6 : 1.0, 0, net_peer.fx < -0.05);
+      /* nome + hp */
+      draw_text((int)sx - text_w(net_peer.name, 1) / 2, (int)sy - (int)(t * 0.9), net_peer.name, 1, 140, 255, 140);
+      if (net_peer.max_hp > 0) {
+        int bw = (int)(t * 0.9);
+        double f = (double)net_peer.hp / net_peer.max_hp;
+        if (f < 0) f = 0;
+        if (f > 1) f = 1;
+        draw_box((int)sx - bw / 2, (int)sy - (int)(t * 0.72), bw, 5, 0, 0, 0, 200, true);
+        draw_box((int)sx - bw / 2, (int)sy - (int)(t * 0.72), (int)(bw * f), 5, 100, 220, 100, 255, true);
+      }
+      if (net_peer.downed) draw_text((int)sx - 30, (int)sy - 40, "AIUTO!", 2, 120, 255, 120);
     }
   }
   /* proiettili */
@@ -698,12 +1005,22 @@ static void draw_hud(void) {
   draw_box(SCR_W - 200, 10, 190, 76, 12, 10, 7, 220, true);
   draw_box(SCR_W - 200, 10, 190, 76, 232, 161, 61, 255, false);
   draw_text(SCR_W - 190, 14, "GIOCATORI", 1, 150, 140, 125);
-  draw_text(SCR_W - 190, 30, "OFFLINE (SOLO)", 1, 150, 150, 150);
-  snprintf(b, sizeof b, "STANZA %s", G.room);
-  draw_text(SCR_W - 190, 46, b, 1, 170, 255, 238);
-  if (G.best_depth > 0) {
-    snprintf(b, sizeof b, "RECORD PIANO %d", G.best_depth);
-    draw_text(SCR_W - 190, 62, b, 1, 232, 161, 61);
+  if (net_connected && net_peer.active) {
+    char pb[48];
+    snprintf(pb, sizeof pb, "%s HP %d", net_peer.name, net_peer.hp);
+    draw_text(SCR_W - 190, 30, pb, 1, 140, 255, 140);
+    if (net_peer.downed) draw_text(SCR_W - 190, 46, "A TERRA!", 1, 255, 120, 120);
+    else draw_text(SCR_W - 190, 46, net_role == NET_HOST ? "TU: HOST" : "TU: GUEST", 1, 150, 150, 150);
+    snprintf(b, sizeof b, "STANZA %s", G.room);
+    draw_text(SCR_W - 190, 62, b, 1, 170, 255, 238);
+  } else {
+    draw_text(SCR_W - 190, 30, "OFFLINE (SOLO)", 1, 150, 150, 150);
+    snprintf(b, sizeof b, "STANZA %s", G.room);
+    draw_text(SCR_W - 190, 46, b, 1, 170, 255, 238);
+    if (G.best_depth > 0) {
+      snprintf(b, sizeof b, "RECORD PIANO %d", G.best_depth);
+      draw_text(SCR_W - 190, 62, b, 1, 232, 161, 61);
+    }
   }
   /* boss bar */
   bool boss_alive = false;
@@ -821,6 +1138,10 @@ static void draw_minimap(void) {
     double pulse = 2.2 + 0.5 * sin(G.torch_clk * 5);
     draw_disc((int)(ox + G.p.x * s), (int)(oy + G.p.y * s), (int)pulse + 1, 255, 255, 255, 255);
   }
+  /* compagno */
+  if (net_connected && net_peer.active) {
+    draw_box((int)(ox + net_peer.x * s) - 2, (int)(oy + net_peer.y * s) - 2, 5, 5, 140, 255, 140, 255, true);
+  }
 }
 
 static void draw_help(void) {
@@ -837,8 +1158,8 @@ static void draw_help(void) {
     "SCENDI LE SCALE, APRI FORZIERI,",
     "COMPRA DAL MERCANTE, UCCIDI I 6 BOSS",
     "OGNI 5 PIANI. STANZA 64 = MOD C64.",
-    "SOLO OFFLINE SU VITA: MONDO FRESCO",
-    "CASUALE COME NELLA WEB.",
+    "LAN 2 GIOCATORI: STESSO WIFI, UNO",
+    "CREA E L'ALTRO CERCA. E RIANIMA!",
     NULL
   };
   int y = 120;
@@ -954,13 +1275,32 @@ static void login_draw(unsigned keys) {
   }
   if (in_enter) {
     in_consume_text();
+    net_leave();
+    net_role = NET_OFF;
     G.state = ST_CLASS;
     class_ok = false;
     sfx_click();
   }
-  if (btn(330, 508, 300, 36, "AVANTI > SCEGLI EROE", true)) {
+  if (btn(330, 508, 140, 36, "SOLO", true)) {
+    net_leave();
+    net_role = NET_OFF;
     G.state = ST_CLASS;
     class_ok = false;
+  }
+  if (btn(480, 508, 140, 36, "CREA LAN", true)) {
+    if (net_host_begin(osk_buf_room)) {
+      strncpy(G.room, osk_buf_room, MAX_ROOM - 1);
+      G.state = ST_CLASS;
+      class_ok = false;
+    } else ab_toast("Rete non disponibile");
+  }
+  if (btn(630, 508, 140, 36, "CERCA LAN", true)) {
+    if (net_scan_begin()) {
+      net_lobby = 1;
+      net_sel = 0;
+      net_scan_t = 0;
+      G.state = ST_NET;
+    } else ab_toast("Rete non disponibile");
   }
   draw_text(230, 150 + 398, "X/INVIO AVANTI - TOUCH PER SCRIVERE", 1, 130, 120, 110);
 }
@@ -1003,9 +1343,7 @@ static void class_draw(unsigned keys) {
     if (in_mouse_pressed && in_mouse_x >= cx && in_mouse_x < cx + cw && in_mouse_y >= cy && in_mouse_y < cy + chh) {
       in_consume_click();
       if (class_sel == i && class_ok) {
-        class_ok = false;
-        ab_new_run(osk_buf_name, class_sel, osk_buf_room);
-        sfx_stairs();
+        start_run_from_class();
       } else {
         class_sel = i;
         class_ok = true;
@@ -1017,11 +1355,150 @@ static void class_draw(unsigned keys) {
   draw_text(60, 470, c->desc, 2, 180, 170, 155);
   if (btn(SCR_W / 2 - 150, 496, 300, 36, "SCENDI NELL'ABISSO", true) || in_enter) {
     in_consume_text();
-    class_ok = false;
-    ab_new_run(osk_buf_name, class_sel, osk_buf_room);
-    sfx_stairs();
+    start_run_from_class();
   }
   draw_text(60, 500, "X SELEZIONA - X DI NUOVO PER PARTIRE", 1, 130, 120, 110);
+}
+
+/* stati lobby multiplayer */
+static int net_lobby = 0; /* 0 attesa host, 1 scansione, 2 risultati */
+static int net_sel = 0;
+static double net_scan_t = 0;
+
+static void start_run_from_class(void) {
+  class_ok = false;
+  if (net_role == NET_HOST) {
+    net_lobby = 0;
+    G.state = ST_NET;
+  } else {
+    ab_new_run(osk_buf_name, class_sel, osk_buf_room);
+  }
+  sfx_stairs();
+}
+
+/* ---------- lobby multiplayer LAN ---------- */
+static void lobby_tick(unsigned keys, unsigned pressed, double dt) {
+  (void)keys;
+  if (net_lobby == 0) { /* host in attesa */
+    if (pressed & K_ATK) {
+      /* via: da solo o col compagno se arrivato */
+      ab_new_run(osk_buf_name, class_sel, osk_buf_room);
+      sfx_stairs();
+    }
+    if (pressed & K_INTER) {
+      net_leave();
+      net_role = NET_OFF;
+      G.state = ST_LOGIN;
+      sfx_click();
+    }
+  } else if (net_lobby == 1) { /* scansione */
+    net_scan_t += dt;
+    net_scan_poll();
+    if (net_scan_t > 4.0) {
+      net_lobby = 2;
+      net_sel = 0;
+      sfx_click();
+    }
+    if (pressed & K_INTER) {
+      net_scan_end();
+      net_leave();
+      net_role = NET_OFF;
+      G.state = ST_LOGIN;
+      sfx_click();
+    }
+  } else { /* risultati */
+    if (pressed & K_UP) { net_sel--; sfx_click(); }
+    if (pressed & K_DOWN) { net_sel++; sfx_click(); }
+    if (net_found_n > 0) {
+      if (net_sel < 0) net_sel = net_found_n - 1;
+      if (net_sel >= net_found_n) net_sel = 0;
+    }
+    if (pressed & K_ATK && net_found_n > 0) {
+      strncpy(osk_buf_room, net_found_room[net_sel], MAX_ROOM - 1);
+      if (net_join(net_found_ip[net_sel], osk_buf_name, class_sel, net_found_room[net_sel])) {
+        strncpy(G.room, net_found_room[net_sel], MAX_ROOM - 1);
+        G.state = ST_CLASS;
+        class_ok = false;
+        ab_toast("Connesso! Scegli la classe.");
+      } else {
+        ab_toast("Connessione fallita.");
+      }
+      sfx_click();
+    }
+    if (pressed & K_INTER) {
+      net_scan_end();
+      net_leave();
+      net_role = NET_OFF;
+      G.state = ST_LOGIN;
+      sfx_click();
+    }
+  }
+}
+
+static void lobby_draw(void) {
+  draw_box(0, 0, SCR_W, SCR_H, 12, 10, 7, 255, true);
+  if (net_lobby == 0) {
+    draw_text(SCR_W / 2 - 150, 120, "STANZA LAN APERTA", 3, 232, 161, 61);
+    char b[64];
+    snprintf(b, sizeof b, "STANZA '%s' - SEED %u", G.room, net_host_seed);
+    draw_text(SCR_W / 2 - text_w(b, 2) / 2, 180, b, 2, 170, 255, 238);
+    draw_text(SCR_W / 2 - 280, 230, "L'ALTRA VITA: CERCA LAN E UNISCITI.", 2, 200, 190, 170);
+    if (net_connected && net_peer.active)
+      draw_text(SCR_W / 2 - 120, 270, "COMPAGNO ARRIVATO!", 2, 140, 255, 140);
+    else
+      draw_text(SCR_W / 2 - 170, 270, "IN ATTESA DEL COMPAGNO...", 2, 150, 150, 150);
+    if (btn(SCR_W / 2 - 150, 340, 300, 44, net_connected ? "INIZIA INSIEME" : "INIZIA DA SOLO", true)) {
+      ab_new_run(osk_buf_name, class_sel, osk_buf_room);
+      sfx_stairs();
+    }
+    if (btn(SCR_W / 2 - 150, 396, 300, 36, "ANNULLA [O]", false)) {
+      net_leave();
+      net_role = NET_OFF;
+      G.state = ST_LOGIN;
+    }
+    draw_text(SCR_W / 2 - 190, 460, "X INIZIA - O ANNULLA", 1, 130, 120, 110);
+  } else if (net_lobby == 1) {
+    draw_text(SCR_W / 2 - 190, 200, "RICERCA STANZE LAN...", 3, 232, 161, 61);
+    draw_text(SCR_W / 2 - 260, 260, "ASSICURATI CHE L'HOST ABBIA CREATO.", 2, 200, 190, 170);
+    if (btn(SCR_W / 2 - 150, 340, 300, 36, "ANNULLA [O]", false)) {
+      net_scan_end();
+      net_leave();
+      net_role = NET_OFF;
+      G.state = ST_LOGIN;
+    }
+  } else {
+    draw_text(SCR_W / 2 - 130, 100, "STANZE TROVATE", 3, 232, 161, 61);
+    if (net_found_n == 0) {
+      draw_text(SCR_W / 2 - 200, 180, "NESSUNA STANZA. STESSO WIFI?", 2, 200, 150, 150);
+    }
+    for (int i = 0; i < net_found_n && i < NET_MAX_FOUND; i++) {
+      int y = 170 + i * 36;
+      bool hi = (i == net_sel);
+      draw_box(SCR_W / 2 - 220, y, 440, 30, hi ? 90 : 35, hi ? 60 : 25, 20, 255, true);
+      char b[96];
+      snprintf(b, sizeof b, "%s @ %s", net_found_room[i], net_found_ip[i]);
+      draw_text(SCR_W / 2 - 210, y + 7, b, 2, hi ? 255 : 220, hi ? 230 : 200, hi ? 180 : 170);
+      if (in_mouse_pressed && in_mouse_x >= SCR_W / 2 - 220 && in_mouse_x < SCR_W / 2 + 220 &&
+          in_mouse_y >= y && in_mouse_y < y + 30) {
+        in_consume_click();
+        net_sel = i;
+        strncpy(osk_buf_room, net_found_room[i], MAX_ROOM - 1);
+        if (net_join(net_found_ip[i], osk_buf_name, class_sel, net_found_room[i])) {
+          strncpy(G.room, net_found_room[i], MAX_ROOM - 1);
+          G.state = ST_CLASS;
+          class_ok = false;
+        } else ab_toast("Connessione fallita.");
+        sfx_click();
+      }
+    }
+    if (btn(SCR_W / 2 - 150, 440, 300, 36, "INDIETRO [O]", true)) {
+      net_scan_end();
+      net_leave();
+      net_role = NET_OFF;
+      G.state = ST_LOGIN;
+    }
+    draw_text(SCR_W / 2 - 190, 490, "X UNISCITI - O INDIETRO", 1, 130, 120, 110);
+  }
 }
 
 static void dead_draw(void) {
@@ -1037,10 +1514,14 @@ static void dead_draw(void) {
   draw_text(SCR_W / 2 - 200, 310, "PERMADEATH COME NELLA WEB.", 2, 150, 140, 130);
   if (btn(SCR_W / 2 - 150, 360, 300, 44, "TORNA AL TITOLO", true) || in_enter) {
     in_consume_text();
+    net_leave();
+    net_role = NET_OFF;
     G.state = ST_LOGIN;
     osk_inited = false;
   }
   if (btn(SCR_W / 2 - 150, 412, 300, 44, "RIPROVA STESSA STANZA", false)) {
+    net_leave();
+    net_role = NET_OFF;
     ab_new_run(osk_buf_name, class_sel, osk_buf_room);
   }
 }
@@ -1082,7 +1563,7 @@ static void scanlines_c64(void) {
   SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
 }
 
-void ren_frame(unsigned keys) {
+void ren_frame(unsigned keys, double dt) {
   unsigned pressed = keys & ~prev_keys;
   prev_keys = keys;
 
@@ -1094,8 +1575,8 @@ void ren_frame(unsigned keys) {
     G.view = 0;
     if (pressed & K_HELP) { G.help = !G.help; sfx_click(); }
     if (pressed & K_POT) { ab_drink_potion(); sfx_potion(); }
-    if (pressed & K_MANA) { ab_drink_mana(); sfx_potion(); }
-    if (pressed & K_ABIL) { ab_use_ability(); sfx_ability(); }
+    if (pressed & K_MANA) { ab_drink_mana(); sfx_mana(); }
+    if (pressed & K_ABIL) { ab_use_ability(); }
     if (pressed & K_INTER) {
       /* debounce: gestito dal main? qui diretto */
       static double last_inter = -1;
@@ -1141,7 +1622,13 @@ void ren_frame(unsigned keys) {
   if (G.state == ST_LOGIN) {
     /* nav tastiera/controller */
     if (pressed & (K_UP | K_DOWN)) { login_field = 1 - login_field; sfx_click(); }
-    if (pressed & K_ATK) { G.state = ST_CLASS; class_ok = false; sfx_click(); }
+    if (pressed & K_ATK) {
+      net_leave();
+      net_role = NET_OFF;
+      G.state = ST_CLASS; class_ok = false; sfx_click();
+    }
+  } else if (G.state == ST_NET) {
+    lobby_tick(keys, pressed, dt);
   } else if (G.state == ST_CLASS) {
     /* selezione a due passi: prima scegli (evidenzia), poi X sulla carta
      * gia scelta (o SCENDI / INVIO) per partire davvero */
@@ -1151,9 +1638,7 @@ void ren_frame(unsigned keys) {
     if (pressed & K_DOWN) { class_sel = (class_sel + 3) % CLS_COUNT; class_ok = false; sfx_click(); }
     if (pressed & K_ATK) {
       if (class_ok) {
-        class_ok = false;
-        ab_new_run(osk_buf_name, class_sel, osk_buf_room);
-        sfx_stairs();
+        start_run_from_class();
       } else {
         class_ok = true;
         sfx_click();
@@ -1174,17 +1659,17 @@ void ren_frame(unsigned keys) {
   SDL_RenderClear(ren);
 
   if (G.state == ST_LOGIN) login_draw(keys);
+  else if (G.state == ST_NET) lobby_draw();
   else if (G.state == ST_CLASS) class_draw(keys);
   else if (G.state == ST_DEAD) dead_draw();
   else {
     draw_world();
+    draw_shocks(dt);
     draw_hud();
     draw_minimap();
     draw_merchant();
     draw_help();
     draw_downed();
-    /* touch buttons Vita (solo hint visivo, input via controller) */
-    if (G.merchant_open) { /* sopra */ }
   }
   scanlines_c64();
   SDL_RenderPresent(ren);

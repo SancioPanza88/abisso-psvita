@@ -73,7 +73,9 @@ if(BUILD_VITA)
   # NB: SDL2/SDL2_image di vdpm portano gia le dipendenze Vita (Sce* stub)
   # in modo transitivo: non aggiungere stub manuali (nomi errati = link error).
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function -Wno-unused-variable")
-  vita_create_self(eboot.bin ${PROJECT_NAME} UNSAFE)
+  # eboot SAFE (come i sample ufficiali): non richiede "unsafe homebrew",
+  # basta per app0: + ux0:data usati dal gioco.
+  vita_create_self(eboot.bin ${PROJECT_NAME})
   # Asset: includi tutte le PNG + livearea
   file(GLOB ASSET_SPRITES "assets/sprites/*.png")
   file(GLOB ASSET_SPECIALI "assets/speciali/*.png")

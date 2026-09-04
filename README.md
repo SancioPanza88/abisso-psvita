@@ -5,9 +5,14 @@ Port **1:1** del roguelike multiplayer web su **PS Vita** (homebrew `.vpk`).
 - Gioco originale: versione web in un unico file (`index.html`, ~9000 righe JS) + sprite in `assets/`.
 - Questo port riscrive il gioco in **C + SDL2/SDL2_image** con gli **stessi asset PNG originali**, stessa logica (stesso RNG `FNV-1a + mulberry32`, stesso scaling, stesse 9 classi, stessi mostri/boss, boss ogni 5 piani in ordine D,X,L,M,R,K, mercante, forzieri, rarità, permadeath, modalità C64 con stanza `64`/`c64`, viste topdown/isometrica).
 
-## Stato rete (onesto)
+## Stato rete
 
-La versione web usa **Trystero + Nostr + WebRTC** (CDN + relay `wss://`). Su PSVita **non esiste uno stack WebRTC** di sistema e la CPU/RAM non reggono `libwebrtc`: il multiplayer P2P **non è disponibile** sulla Vita.
+La versione web usa **Trystero + Nostr + WebRTC** (CDN + relay `wss://`). Su PSVita **non esiste uno stack WebRTC** di sistema e la CPU/RAM non reggono `libwebrtc`: il multiplayer P2P web **non è disponibile** sulla Vita.
+
+Al suo posto c'è il **multiplayer LAN per 2 Vita/PSTV** sulla stessa rete WiFi:
+- Uno crea la stanza (`CREA LAN`), l'altro la cerca (`CERCA LAN`) e si unisce.
+- Host autoritativo come nella web: mostri, oggetti, forzieri, boss e piani sono i suoi; il compagno riceve lo snapshot 10 volte al secondo.
+- Stesso dungeon per entrambi (stesso seed), rianimazione del compagno a terra con E, uscita scale sincronizzata.
 
 Per restare 1:1 dove conta:
 - **Stesse tabelle e formule**: classi, mostri, boss, equip, rarità, mercante, pozioni, FOV, dungeon — copiati dalla web.

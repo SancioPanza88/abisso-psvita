@@ -57,6 +57,17 @@ else()
   target_link_libraries(${PROJECT_NAME} SDL2_image)
 endif()
 target_link_libraries(${PROJECT_NAME} m)
+# SDL2_image statica su Vita richiede libpng/libjpeg/zlib: collegale
+# esplicitamente se presenti nel sysroot (innocuo se gia transitive).
+if(BUILD_VITA)
+  foreach(_lname png16 png jpeg z)
+    find_library(_found_${_lname} ${_lname}
+      PATHS "$ENV{VITASDK}/arm-vita-eabi/lib" NO_DEFAULT_PATH)
+    if(_found_${_lname})
+      target_link_libraries(${PROJECT_NAME} ${_found_${_lname}})
+    endif()
+  endforeach()
+endif()
 
 if(BUILD_VITA)
   # NB: SDL2/SDL2_image di vdpm portano gia le dipendenze Vita (Sce* stub)

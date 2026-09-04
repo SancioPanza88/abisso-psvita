@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: vitasdk/vitasdk:latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,8 +35,24 @@ jobs:
 
       - name: Build
         run: |
-          cmake --build build -j$(nproc)
+          set -o pipefail
+          cmake --build build -j$(nproc) 2>&1 | tee build/build.log
           ls -lh build/*.vpk build/eboot.bin || ls -lh build/
+
+      - name: Report build errors (public commit comment)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let log = '(build.log mancante)';
+            try { log = fs.readFileSync('build/build.log', 'utf8'); } catch (e) {}
+            const keep = log.split('\n').filter(l => /error|undefined reference|cannot find|No such|FAILED/i.test(l)).slice(-30);
+            const body = 'Build VPK fallita, errori:\n```\n' + (keep.join('\n') || log.slice(-2000)) + '\n```';
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              commit_sha: context.sha, body: body.slice(0, 6000)
+            });
 
       - name: Upload VPK
         uses: actions/upload-artifact@v4

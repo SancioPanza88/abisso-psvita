@@ -7,11 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <time.h>
-
-#ifdef ABISSO_VITA
-#include <psp2/kernel/processmgr.h>
-#endif
 
 int main(int argc, char *argv[]) {
   (void)argc; (void)argv;
@@ -59,8 +54,5 @@ int main(int argc, char *argv[]) {
   in_quit();
   ren_quit();
   SDL_Quit();
-#ifdef ABISSO_VITA
-  sceKernelExitProcess(0);
-#endif
   return 0;
 }

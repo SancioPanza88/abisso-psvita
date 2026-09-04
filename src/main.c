@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <time.h>
 
 #ifdef ABISSO_VITA
 #include <psp2/kernel/processmgr.h>

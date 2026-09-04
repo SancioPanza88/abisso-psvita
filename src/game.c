@@ -1757,7 +1757,7 @@ void ab_update(double dt, unsigned keys) {
           double dd2 = sqrt(vx2*vx2 + vy2*vy2);
           if (dd2 <= 1.6 && dd2 > 0.01) {
             double dot = (vx2 / dd2) * m->facing_x + (vy2 / dd2) * m->facing_y;
-            if (dot >= 0.55) damage_hero(tgt_peer, m->dmg + ab_rng_range(&rr, 0, 1, false), false);
+            if (dot >= 0.55) damage_hero(tgt_peer, m->dmg + ab_rng_range(&rr, 0, 1), false, false);
           }
           ab_burst(m->x + m->facing_x, m->y + m->facing_y, 8, 0.9, 0.9, 0.9, 3);
         }

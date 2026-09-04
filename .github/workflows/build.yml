@@ -1,0 +1,59 @@
+name: Build VPK (PSVita)
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-vpk:
+    runs-on: ubuntu-latest
+    container:
+      image: vitasdk/vitasdk:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (SDL2)
+        run: |
+          vdpm update || true
+          vdpm install sdl2 sdl2_image || true
+          arm-vita-eabi-gcc --version
+          cmake --version
+          ls "$VITASDK/share/vita.toolchain.cmake"
+
+      - name: Configure (Vita toolchain)
+        run: |
+          cmake -B build -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          cmake --build build -j$(nproc)
+          ls -lh build/*.vpk build/eboot.bin || ls -lh build/
+
+      - name: Upload VPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: abisso-vpk
+          path: build/*.vpk
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-vpk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download VPK
+        uses: actions/download-artifact@v4
+        with:
+          name: abisso-vpk
+          path: dist
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.vpk
+          generate_release_notes: true

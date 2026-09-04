@@ -1,0 +1,10 @@
+build/
+build-pc/
+*.o
+*.elf
+*.self
+*.velf
+*.vpk
+*.sfo
+abisso_save.txt
+.vscode/

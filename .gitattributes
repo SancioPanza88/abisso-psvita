@@ -1,0 +1,4 @@
+# PNG mai convertiti (devono restare byte-identici, 8-bit indexed per la Vita)
+*.png binary
+# LiveArea vuole CRLF
+sce_sys/livearea/contents/template.xml text eol=crlf

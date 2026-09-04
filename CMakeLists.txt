@@ -60,7 +60,7 @@ target_link_libraries(${PROJECT_NAME} m)
 # SDL2_image statica su Vita richiede le sue dipendenze (png/jpeg/webp/z):
 # collegale esplicitamente se presenti nel sysroot (innocuo se transitive).
 if(BUILD_VITA)
-  foreach(_lname png16 png jpeg webpdemux webp sharpyuv z)
+  foreach(_lname png16 png jpeg webpdemux webp sharpyuv pthread z)
     find_library(_found_${_lname} ${_lname}
       PATHS "$ENV{VITASDK}/arm-vita-eabi/lib" NO_DEFAULT_PATH)
     if(_found_${_lname})

@@ -18,9 +18,10 @@ static SDL_Renderer *ren = NULL;
 
 /* ---------- sprite ---------- */
 #define MAXSPR 72
-typedef struct { char name[48]; SDL_Texture *tex; int w, h; } Spr;
+typedef struct { char name[48]; SDL_Texture *tex; int w, h; SDL_Rect crop; bool has_crop; } Spr;
 static Spr sprs[MAXSPR];
 static int nspr = 0;
+static int spr_ok = 0;
 
 static void asset_try(const char *rel, char *out, size_t n) {
 #ifdef ABISSO_VITA
@@ -37,6 +38,57 @@ static SDL_Texture *spr_get(const char *name) {
   return NULL;
 }
 
+static SDL_Rect *spr_crop(const char *name) {
+  for (int i = 0; i < nspr; i++)
+    if (strcmp(sprs[i].name, name) == 0) return sprs[i].has_crop ? &sprs[i].crop : NULL;
+  return NULL;
+}
+
+/* Come prepareTileTextures() della web: i PNG dei terreni hanno grandi
+ * margini trasparenti (1408x768) — si ritaglia il bbox opaco e la tile
+ * disegna solo quello, altrimenti resta un francobollo su sfondo nero. */
+static bool needs_crop(const char *name) {
+  static const char *list[] = {
+    "floor_stone","floor_dirt","wall_stone","wall_brick","stairs","torch",NULL
+  };
+  for (int i = 0; list[i]; i++)
+    if (strcmp(name, list[i]) == 0) return true;
+  return false;
+}
+
+static SDL_Rect surf_bbox(SDL_Surface *s) {
+  SDL_Rect r = {0, 0, s->w, s->h};
+  SDL_Surface *c = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_RGBA32, 0);
+  if (!c) return r;
+  if (SDL_MUSTLOCK(c)) SDL_LockSurface(c);
+  {
+    Uint32 *px = (Uint32 *)c->pixels;
+    int stride = c->pitch / 4;
+    int x0 = c->w, y0 = c->h, x1 = -1, y1 = -1;
+    for (int y = 0; y < c->h; y++) {
+      for (int x = 0; x < c->w; x++) {
+        Uint8 a = (Uint8)((px[y * stride + x] >> 24) & 0xFF);
+        if (a > 8) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (x1 >= x0 && y1 >= y0) {
+      if (x0 > 1) x0 -= 2;
+      if (y0 > 1) y0 -= 2;
+      if (x1 < s->w - 3) x1 += 2;
+      if (y1 < s->h - 3) y1 += 2;
+      r.x = x0; r.y = y0; r.w = x1 - x0 + 1; r.h = y1 - y0 + 1;
+    }
+  }
+  if (SDL_MUSTLOCK(c)) SDL_UnlockSurface(c);
+  SDL_FreeSurface(c);
+  return r;
+}
+
 static void spr_load(const char *name, const char *rel) {
   if (nspr >= MAXSPR) return;
   char path[160];
@@ -49,10 +101,17 @@ static void spr_load(const char *name, const char *rel) {
     s = IMG_Load(p2);
   }
   strncpy(sprs[nspr].name, name, 47);
+  sprs[nspr].name[47] = '\0';
+  sprs[nspr].has_crop = false;
   if (s) {
+    if (needs_crop(name)) {
+      sprs[nspr].crop = surf_bbox(s);
+      sprs[nspr].has_crop = true;
+    }
     sprs[nspr].tex = SDL_CreateTextureFromSurface(ren, s);
     sprs[nspr].w = s->w; sprs[nspr].h = s->h;
     SDL_FreeSurface(s);
+    if (sprs[nspr].tex) spr_ok++;
   } else {
     sprs[nspr].tex = NULL;
     sprs[nspr].w = sprs[nspr].h = 32;
@@ -211,12 +270,13 @@ static void w2s(double wx, double wy, double *sx, double *sy) {
 
 static void draw_spr(const char *name, double sx, double sy, double scale, double alpha) {
   SDL_Texture *t = spr_get(name);
+  SDL_Rect *src = spr_crop(name);
   int dw = (int)(tile_px() * scale);
   int dh = (int)(tile_px() * scale);
   SDL_Rect d = {(int)(sx - dw / 2), (int)(sy - dh / 2), dw, dh};
   if (t) {
     SDL_SetTextureAlphaMod(t, (Uint8)(alpha * 255));
-    SDL_RenderCopy(ren, t, NULL, &d);
+    SDL_RenderCopy(ren, t, src, &d);
     SDL_SetTextureAlphaMod(t, 255);
   } else {
     draw_box(d.x, d.y, d.w, d.h, 120, 90, 60, (Uint8)(alpha * 255), true);
@@ -274,7 +334,7 @@ static void draw_world(void) {
       }
       if (!light) {
         int sxx = (int)(sx - t / 2), syy = (int)(sy - t / 2);
-        draw_box(sxx, syy, (int)t + 1, (int)t + 1, 0, 0, 0, 170, true);
+        draw_box(sxx, syy, (int)t + 1, (int)t + 1, 0, 0, 0, 110, true);
       }
     }
   }
@@ -508,6 +568,18 @@ static void draw_hud(void) {
   char h[96];
   snprintf(h, sizeof h, "Z %.1f %s %s", G.zoom, G.view ? "ISO" : "TOP", G.mute ? "MUTE" : "SND");
   draw_text(SCR_W - 250, SCR_H - 26, h, 2, 160, 150, 130);
+  /* riga diagnostica: verifica mappa/sprite */
+  {
+    int fl = 0;
+    for (int yy = 0; yy < G.map.h; yy++)
+      for (int xx = 0; xx < G.map.w; xx++)
+        if (G.map.tiles[yy][xx] != T_WALL) fl++;
+    int ptx = (int)G.p.x, pty = (int)G.p.y;
+    int pt = (ptx >= 0 && pty >= 0 && ptx < G.map.w && pty < G.map.h) ? G.map.tiles[pty][ptx] : -1;
+    char dg[96];
+    snprintf(dg, sizeof dg, "MAP %dx%d FL %d PT %d SPR %d/%d", G.map.w, G.map.h, fl, pt, spr_ok, nspr);
+    draw_text(SCR_W - 330, SCR_H - 42, dg, 1, 120, 120, 120);
+  }
   /* controlli Vita */
   draw_text(12, SCR_H - 26, "X ATK O USA Q XYZ R MANA R1 ABIL", 1, 140, 130, 115);
 }

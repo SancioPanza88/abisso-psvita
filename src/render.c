@@ -228,12 +228,9 @@ static void draw_spr(const char *name, double sx, double sy, double scale, doubl
 static int login_field = 0;
 static int class_sel = 0;
 static int merch_sel = 0;
-static double edge_cd = 0;
 static char osk_buf_name[MAX_NAME] = "Viandante";
 static char osk_buf_room[MAX_ROOM] = "abisso";
 static bool osk_inited = false;
-
-static const char *rar_name(int r) { return r == 3 ? "LEG" : r == 2 ? "EPI" : r == 1 ? "RAR" : "COM"; }
 
 static void draw_world(void) {
   double t = tile_px();
@@ -849,7 +846,6 @@ void ren_frame(unsigned keys) {
     if (pressed & (K_UP | K_DOWN)) { login_field = 1 - login_field; sfx_click(); }
     if (pressed & K_ATK) { G.state = ST_CLASS; sfx_click(); }
   } else if (G.state == ST_CLASS) {
-    if (edge_cd > 0) edge_cd -= 0.016;
     if (pressed & K_LEFT) { class_sel = (class_sel + CLS_COUNT - 1) % CLS_COUNT; sfx_click(); }
     if (pressed & K_RIGHT) { class_sel = (class_sel + 1) % CLS_COUNT; sfx_click(); }
     if (pressed & K_UP) { class_sel = (class_sel + CLS_COUNT - 3) % CLS_COUNT; sfx_click(); }
@@ -883,5 +879,4 @@ void ren_frame(unsigned keys) {
   }
   scanlines_c64();
   SDL_RenderPresent(ren);
-  edge_cd = 0;
 }

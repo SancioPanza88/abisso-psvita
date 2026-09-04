@@ -1012,7 +1012,15 @@ void ab_update(double dt, unsigned keys) {
       m->regen_acc += dt * m->max_hp * 0.045;
       if (m->regen_acc >= 1) { int h = (int)m->regen_acc; m->regen_acc -= h; m->hp += h; if (m->hp > m->max_hp) m->hp = m->max_hp; }
     }
-    if (m->dot_t > 0) { m->dot_t -= dt; m->hp -= (int)(dt * 3 + 0.5) > 0 ? 1 : 0; if (m->hp <= 0) { kill_monster(i); continue; } }
+    if (m->dot_t > 0) {
+      m->dot_t -= dt;
+      m->dot_acc += dt;
+      if (m->dot_acc >= 0.5) {
+        m->dot_acc = 0;
+        m->hp -= 1;
+        if (m->hp <= 0) { kill_monster(i); continue; }
+      }
+    }
     if (m->atk_cd > 0) m->atk_cd -= dt;
     double dd = ab_dist(G.p.x, G.p.y, m->x, m->y);
     bool aggro = dd < m->aggro || (m->is_boss && G.boss_active);
@@ -1039,8 +1047,7 @@ void ab_update(double dt, unsigned keys) {
         /* attacco contatto / proiettili sciamano/boss */
         if (dd < 0.9 && m->atk_cd <= 0) {
           m->atk_cd = 1.0;
-          hurt_player(m->dmg);
-          if (td && td->poison) { /* veleno: hurt extra nel tempo via burst? */ }
+          hurt_player(m->dmg + ((td && td->poison) ? 2 : 0));
           if (td && td->lifesteal) { m->hp += 2; if (m->hp > m->max_hp) m->hp = m->max_hp; }
         }
         /* sciamano e boss ranged */

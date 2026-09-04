@@ -93,8 +93,6 @@ char ab_boss_for_depth(int depth) {
 }
 
 const char *ab_boss_name(char b) {
-  const AbMonDef k = {0};
-  (void)k;
   for (size_t i = 0; i < sizeof(MONS)/sizeof(MONS[0]); i++)
     if (MONS[i].key[0] == b) return MONS[i].name;
   return "Boss";

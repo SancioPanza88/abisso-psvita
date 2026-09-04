@@ -111,7 +111,7 @@ typedef struct {
   double speed, aggro;
   double facing_x, facing_y;
   double atk_cd, wander_t, wx, wy;
-  double dot_t;      /* veleno */
+  double dot_t, dot_acc;   /* veleno */
   double regen_acc;
   int affix; /* 0 nessuno,1 veloce,2 esplosivo,3 rigenerante */
   bool is_boss;

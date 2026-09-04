@@ -59,17 +59,8 @@ endif()
 target_link_libraries(${PROJECT_NAME} m)
 
 if(BUILD_VITA)
-  target_link_libraries(${PROJECT_NAME}
-    SceDisplay_stub
-    SceCtrl_stub
-    SceTouch_stub
-    SceHid_stub
-    SceAudio_stub
-    SceCommonDialog_stub
-    SceIme_stub
-    ScePower_stub
-    SceAppMgr_stub
-  )
+  # NB: SDL2/SDL2_image di vdpm portano gia le dipendenze Vita (Sce* stub)
+  # in modo transitivo: non aggiungere stub manuali (nomi errati = link error).
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-unused-function -Wno-unused-variable")
   vita_create_self(eboot.bin ${PROJECT_NAME} UNSAFE)
   # Asset: includi tutte le PNG + livearea

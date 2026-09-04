@@ -14,6 +14,12 @@
 
 bool ab_merchant_buy(int idx);
 
+/* forward */
+static void draw_ring(int cx, int cy, int r, Uint8 R, Uint8 Gc, Uint8 Bc);
+static void start_run_from_class(void);
+static void lobby_tick(unsigned keys, unsigned pressed, double dt);
+static void lobby_draw(void);
+
 static SDL_Window *win = NULL;
 static SDL_Renderer *ren = NULL;
 
@@ -601,6 +607,10 @@ static int login_field = 0;
 static int class_sel = 0;
 static bool class_ok = false;
 static int merch_sel = 0;
+/* stati lobby multiplayer */
+static int net_lobby = 0; /* 0 attesa host, 1 scansione, 2 risultati */
+static int net_sel = 0;
+static double net_scan_t = 0;
 static char osk_buf_name[MAX_NAME] = "Viandante";
 static char osk_buf_room[MAX_ROOM] = "abisso";
 static bool osk_inited = false;
@@ -1360,11 +1370,7 @@ static void class_draw(unsigned keys) {
   draw_text(60, 500, "X SELEZIONA - X DI NUOVO PER PARTIRE", 1, 130, 120, 110);
 }
 
-/* stati lobby multiplayer */
-static int net_lobby = 0; /* 0 attesa host, 1 scansione, 2 risultati */
-static int net_sel = 0;
-static double net_scan_t = 0;
-
+/* stati lobby multiplayer (definiti sopra) */
 static void start_run_from_class(void) {
   class_ok = false;
   if (net_role == NET_HOST) {
@@ -1373,7 +1379,7 @@ static void start_run_from_class(void) {
   } else {
     ab_new_run(osk_buf_name, class_sel, osk_buf_room);
   }
-  sfx_stairs();
+  sfx_stair();
 }
 
 /* ---------- lobby multiplayer LAN ---------- */
@@ -1383,7 +1389,7 @@ static void lobby_tick(unsigned keys, unsigned pressed, double dt) {
     if (pressed & K_ATK) {
       /* via: da solo o col compagno se arrivato */
       ab_new_run(osk_buf_name, class_sel, osk_buf_room);
-      sfx_stairs();
+      sfx_stair();
     }
     if (pressed & K_INTER) {
       net_leave();
@@ -1449,7 +1455,7 @@ static void lobby_draw(void) {
       draw_text(SCR_W / 2 - 170, 270, "IN ATTESA DEL COMPAGNO...", 2, 150, 150, 150);
     if (btn(SCR_W / 2 - 150, 340, 300, 44, net_connected ? "INIZIA INSIEME" : "INIZIA DA SOLO", true)) {
       ab_new_run(osk_buf_name, class_sel, osk_buf_room);
-      sfx_stairs();
+      sfx_stair();
     }
     if (btn(SCR_W / 2 - 150, 396, 300, 36, "ANNULLA [O]", false)) {
       net_leave();

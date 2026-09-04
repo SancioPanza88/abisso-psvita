@@ -15,6 +15,9 @@
 #include <sys/types.h>
 #endif
 
+static bool peer_targetable(void);
+static void damage_hero(bool peer, int dmg, bool poison, bool web);
+
 AbGame G;
 
 /* ---------------- util ---------------- */
